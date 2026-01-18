@@ -5,4 +5,7 @@ gradio
 openai>=1.0.0
 python-dotenv
 azure-identity
+azure-ai-inference
+Pillow
+requests
 # Optional: add pandas or numpy only if you use them in your code
