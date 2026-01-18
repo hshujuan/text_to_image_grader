@@ -1,0 +1,8 @@
+# Remove duplicate and unnecessary packages, and ensure compatibility with your app and Python version
+# Recommended requirements.txt for your Gradio Azure OpenAI app
+
+gradio
+openai>=1.0.0
+python-dotenv
+azure-identity
+# Optional: add pandas or numpy only if you use them in your code
