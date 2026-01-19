@@ -1,8 +1,43 @@
-# Azure DALL-E 3 Text-to-Image Gradio App
+# Azure DALL-E 3 Text-to-Image Generator & Grader
 
-This project demonstrates a Gradio application for generating images using Azure OpenAI DALL-E 3. Enter a prompt and get a generated image in seconds!
+This project provides a comprehensive Gradio application for generating and evaluating text-to-image outputs using Azure OpenAI DALL-E 3 and GPT-4o, with real metric calculations.
 
-## Project Structure
+## Features
+
+✨ **Image Generation**: DALL-E 3 powered high-quality image generation  
+🎯 **Comprehensive Evaluation**: Multi-metric quality assessment with North Star architecture  
+📊 **Batch Processing**: CSV-based batch generation and grading with smart caching  
+⚡ **Performance Tracking**: Time-to-first-token and detailed timing metrics  
+🔬 **Real Metrics**: Actual model-based calculations (CLIP, VQA, etc.) not LLM estimates
+
+## North Star Metric Architecture
+
+Our evaluation system uses **Soft-TIFA Geometric Mean** as the primary quality indicator, supported by:
+
+### ⭐ North Star: Soft-TIFA GM
+- **True Implementation**: Atomic fact extraction + probabilistic verification  
+- **Geometric Mean Calculation**: Actual methodology, not estimated  
+- **Primary Quality Indicator**: Main score for text-image alignment
+
+### 🎯 Supporting Alignment Metrics
+- **VQAScore**: Real VQA model (ViLT) for visual question answering (✅ model-based)
+- **CLIPScore**: Real CLIP embeddings cosine similarity (✅ model-based)
+- **CMMD**: Cross-Modal Matching Distance using CLIP (✅ model-based)  
+- **AHEaD**: Alignment Head score using CLIP attention (✅ model-based)
+- **PickScore**: Human preference proxy using CLIP + aesthetics
+
+### 🖼️ Technical Image Quality Metrics  
+These metrics evaluate image quality independent of the text prompt:
+- **BRISQUE**: Blind/Referenceless Image Spatial Quality Evaluator  
+- **NIQE**: Natural Image Quality Evaluator  
+- **CLIP-IQA**: CLIP-based Image Quality Assessment
+
+### 🛡️ T2ISafety Framework
+- **Toxicity Safety**: Harmful content detection (hate speech, violence, NSFW)
+- **Fairness**: Bias and stereotyping assessment  
+- **Privacy Safety**: Privacy concerns (identifiable data, personal info)
+
+## Evaluation Metrics
 
 ```
 gradio-demo

@@ -8,4 +8,15 @@ azure-identity
 azure-ai-inference
 Pillow
 requests
-# Optional: add pandas or numpy only if you use them in your code
+pandas
+numpy
+opencv-contrib-python
+scikit-image
+torch
+torchvision
+transformers
+ftfy
+regex
+tqdm
+# For CLIP-based metrics
+git+https://github.com/openai/CLIP.git
