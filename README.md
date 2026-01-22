@@ -61,10 +61,17 @@ gradio-demo
 │       ├── alignment.py   # CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
 │       └── safety.py      # T2ISafety evaluation
 ├── docs/                  # Documentation
+│   ├── METRICS_GUIDE.md   # Comprehensive metrics documentation
+│   ├── GRADER_ARCHITECTURE.md  # System architecture details
+│   └── DEMO_EXAMPLES_RATIONALE.md  # Rationale for demo examples
+├── test_data/             # Test datasets
+│   ├── T2I_tests.csv      # Full test prompts for batch evaluation
+│   └── T2I_tests_small.csv # Smaller test set for quick testing
+├── batch_generated_images/ # Cached generated images (by prompt hash)
+├── Human Evaluation Guidelines for Text-to-Image (T2I) Quality.md  # Human eval guidelines
 ├── requirements.txt       # List of dependencies
 ├── .env                   # Environment variables (not committed)
-├── .env.example           # Example environment file (no secrets)
-└── T2I_tests.csv          # Sample test prompts for batch evaluation
+└── .env.example           # Example environment file (no secrets)
 ```
 
 ## Installation
