@@ -463,6 +463,8 @@ def run_batch_grading(file_obj, force_regenerate=False, generate_missing=False):
     if file_obj is None:
         return None, "⚠️ Please upload a CSV file with at least a 'prompt' column."
     
+    PASS_THRESHOLD = 80  # Soft-TIFA Score threshold for pass/fail
+    
     def make_error_result(prompt, category, image_name, status):
         """Create a result dict with all columns for error cases"""
         return {
@@ -471,6 +473,7 @@ def run_batch_grading(file_obj, force_regenerate=False, generate_missing=False):
             "Image": image_name,
             "Atoms Evaluated": 0,
             "Soft-TIFA Score": 0.0,
+            "Pass/Fail": "❌ Fail",
             "BRISQUE": 0.0,
             "NIQE": 0.0,
             "CLIP-IQA": 0.0,
@@ -717,12 +720,16 @@ Respond with ONLY a number between 0.0 and 1.0.
                 fairness_score = 100.0
                 privacy_score = 100.0
             
+            tifa_score = round(gm_score * 100, 2)
+            pass_fail = "✅ Pass" if tifa_score >= PASS_THRESHOLD else "❌ Fail"
+            
             results.append({
                 "Prompt": prompt,
                 "Category": category,
                 "Image": os.path.basename(img_path) if has_image_path else os.path.basename(img_path),
                 "Atoms Evaluated": len(atoms),
-                "Soft-TIFA Score": round(gm_score * 100, 2),
+                "Soft-TIFA Score": tifa_score,
+                "Pass/Fail": pass_fail,
                 "BRISQUE": round(brisque_score, 2),
                 "NIQE": round(niqe_score, 2),
                 "CLIP-IQA": round(clip_iqa_score, 2),
@@ -746,6 +753,16 @@ Respond with ONLY a number between 0.0 and 1.0.
         avg_technical_quality = (avg_brisque + avg_niqe + avg_clip_iqa) / 3
         avg_safety = (avg_toxicity + avg_fairness + avg_privacy) / 3
         
+        # Calculate pass rate
+        if 'Pass/Fail' in res_df.columns:
+            pass_count = (res_df['Pass/Fail'] == '✅ Pass').sum()
+            total_count = len(res_df)
+            pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
+        else:
+            pass_count = 0
+            total_count = len(res_df)
+            pass_rate = 0
+        
         if not has_image_path:
             summary = f"""📊 **Batch Complete:** {len(results)} images evaluated
 
@@ -758,6 +775,7 @@ Respond with ONLY a number between 0.0 and 1.0.
 
 🎯 **Text-to-Image Alignment:**
 - Soft-TIFA Score: {avg_tifa:.2f}/100
+- **Pass Rate (≥80): {pass_rate:.1f}% ({pass_count}/{total_count})**
 
 🖼️ **Technical Image Quality:**
 - BRISQUE: {avg_brisque:.2f}/100
@@ -789,6 +807,7 @@ Respond with ONLY a number between 0.0 and 1.0.
 
 🎯 **Text-to-Image Alignment:**
 - Soft-TIFA Score: {avg_tifa:.2f}/100
+- **Pass Rate (≥80): {pass_rate:.1f}% ({pass_count}/{total_count})**
 
 🖼️ **Technical Image Quality:**
 - BRISQUE: {avg_brisque:.2f}/100
