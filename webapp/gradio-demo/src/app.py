@@ -842,7 +842,17 @@ def infer(prompt):
         return None, f"Error: {e}"
 
 with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
-    gr.Markdown("# 🎨 Azure DALL-E 3 Text-to-Image Generator with AI Quality Grading")
+    # Header with title and author info aligned right
+    with gr.Row():
+        with gr.Column(scale=3):
+            gr.Markdown("# 🎨 Azure DALL-E 3 Text-to-Image Generator with AI Quality Grading")
+        with gr.Column(scale=1):
+            gr.Markdown("""
+<div style="text-align: right; font-size: 1.1em;">
+<b>Author:</b> Jane Huang<br>
+<b>Powered by:</b> Azure OpenAI GPT-4o | DALL-E 3
+</div>
+""")
     gr.Markdown("Generate images from text prompts and receive **automated quality assessment** across 3 dimensions: **Image Quality**, **Text-Image Alignment**, and **Responsible AI Check**.")
     gr.Markdown("💡 **New to the metrics?** Visit the **📖 Metrics Guide** tab to understand how each score is calculated!")
     
@@ -905,50 +915,49 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
             )
         
         with gr.TabItem("📊 Batch Scoring"):
-            gr.Markdown("""
-### High-Precision Batch Evaluation with Smart Caching 🚀
-
-**Smart Caching Feature:**
-- ✅ Images are automatically cached based on prompt
+            gr.Markdown("### High-Precision Batch Evaluation 🚀")
+            
+            # Three modes in a row
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("""
+**Mode 1: Auto-Generate**
+- CSV: `prompt` (+ `category`)
+- Generates with DALL-E 3
+                    """)
+                with gr.Column(scale=1):
+                    gr.Markdown("""
+**Mode 2: Grade Existing**
+- CSV: `prompt`, `image_path` (+ `category`)
+- Loads from specified paths
+                    """)
+                with gr.Column(scale=1):
+                    gr.Markdown("""
+**Mode 3: Hybrid** ✨
+- Same as Mode 2 + checkbox
+- Generates missing images
+                    """)
+            
+            gr.Markdown("*Note: `category` column is optional for all modes*")
+            
+            # Collapsible sections
+            with gr.Row():
+                with gr.Accordion("✨ Smart Caching Feature", open=False):
+                    gr.Markdown("""
+- ✅ Images are automatically cached based on prompt hash
 - ✅ Re-running with same prompts uses cached images (FREE!)
 - ✅ Only generates new images for new/changed prompts
 - ✅ Saves money and time on repeated evaluations
+                    """)
+                with gr.Accordion("📖 CSV Examples", open=False):
+                    gr.Markdown("""
+**Mode 1:** `prompt,category` → `"A red cat",simple`
 
-**Three modes supported:**
+**Mode 2/3:** `prompt,image_path,category` → `"A red cat",./images/img1.png,simple`
 
-**Mode 1: Auto-Generate Images**
-- CSV with only `prompt` column (and optional `category`)
-- App generates images automatically using DALL-E 3
-- Saves to `batch_generated_images/` folder with smart caching
-
-**Mode 2: Grade Existing Images** (For pre-generated images)
-- CSV with `prompt`, `image_path`, and optional `category` columns
-- Loads images from specified paths (supports relative paths from CSV location)
-- Use this mode when you already have images to evaluate
-
-**Mode 3: Hybrid - Generate Missing Images** ✨ NEW
-- CSV with `prompt`, `image_path`, and optional `category` columns
-- Check the "🎨 Generate Missing Images" checkbox
-- If an image doesn't exist at the path, it generates with DALL-E 3
-- Perfect for evaluating a mix of existing + new images!
-
-**Example CSV (Mode 1 - Auto-generate):**
-```
-prompt,category
-"A red cat on a blue sofa",simple
-"A woman with blonde hair",portrait
-"A scenic mountain landscape",landscape
-```
-
-**Example CSV (Mode 2/3 - Existing images):**
-```
-prompt,image_path,category
-"A red cat on a blue sofa",./images/image1.png,simple
-"A woman with blonde hair",./images/image2.png,portrait
-```
-
-💡 **Pro Tip:** Paths in `image_path` can be relative to the CSV file location or absolute paths!
-            """)
+💡 Paths can be relative to CSV location or absolute.
+                    """)
+            
             b_file = gr.File(label="Upload Dataset (CSV)", file_types=[".csv"])
             
             with gr.Row():
@@ -1146,15 +1155,6 @@ All use GPT-4o to analyze potential ethical and safety concerns:
 
 **This demonstrates why RAI testing matters!** T2I models can generate sensitive content.
             """)
-    
-    gr.Markdown("---")
-    gr.Markdown("""
-**Powered by:** Azure OpenAI GPT-4o Vision | DALL-E 3
-
-**Author & Support:** Jane Huang | For questions or issues, please reach out.
-
-*Note: Ensure your Azure OpenAI endpoint is configured in `.env`*
-""")
 
 if __name__ == "__main__":
     demo.launch(share=False)
