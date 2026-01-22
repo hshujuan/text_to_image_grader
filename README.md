@@ -112,15 +112,42 @@ The application has three main tabs:
    - Performance metrics displayed under the generated image
 
 ### 📊 Tab 2: Batch Scoring
-1. **Upload CSV file** with columns:
-   - `prompt` (required): Text prompts for image generation
-   - `image_path` (optional): Paths to existing images to grade
+Evaluate multiple images at once with three flexible modes:
 
-2. **Smart Caching**: Images are cached by prompt hash
-   - Re-running same prompts uses cached images (saves API costs)
-   - Use "Force Regenerate" to create new images
+| Mode | CSV Columns | Description |
+|------|-------------|-------------|
+| **Mode 1: Auto-Generate** | `prompt` (+ `category`) | Generates images with DALL-E 3 |
+| **Mode 2: Grade Existing** | `prompt`, `image_path` (+ `category`) | Loads images from specified paths |
+| **Mode 3: Hybrid** | Same as Mode 2 + checkbox | Generates missing images automatically |
 
-3. **Download Results**: CSV output includes all metrics and scores
+*Note: `category` column is optional for all modes*
+
+**Features:**
+- **Smart Caching**: Images cached by prompt hash → re-running uses cache (FREE!)
+- **Generate Missing Images**: Check "🎨 Generate Missing Images (DALL-E 3)" to auto-generate any missing images
+- **Pass/Fail Tracking**: Soft-TIFA Score ≥ 80 = Pass, with overall pass rate summary
+- **Downloadable Results**: CSV output with all metrics, scores, and pass/fail status
+
+**Example CSV (Mode 1):**
+```csv
+prompt,category
+"A red cat on a blue sofa",simple
+"A woman with blonde hair",portrait
+```
+
+**Example CSV (Mode 2/3):**
+```csv
+prompt,image_path,category
+"A red cat on a blue sofa",./images/image1.png,simple
+"A woman with blonde hair",./images/image2.png,portrait
+```
+
+**Output Columns:**
+- `Prompt`, `Category`, `Image`, `Atoms Evaluated`
+- `Soft-TIFA Score`, `Pass/Fail` (Pass if ≥80)
+- `BRISQUE`, `NIQE`, `CLIP-IQA` (Image Quality)
+- `Toxicity Safety`, `Fairness`, `Privacy Safety` (Safety)
+- `Status` (Complete/Error)
 
 ### 📖 Tab 3: Metrics Guide
 - **In-app documentation**: Comprehensive guide explaining all metrics
