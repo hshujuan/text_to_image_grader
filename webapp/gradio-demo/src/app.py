@@ -455,7 +455,7 @@ def get_cached_image_path(prompt, cache_dir):
     prompt_hash = hashlib.md5(prompt.encode('utf-8')).hexdigest()
     return os.path.join(cache_dir, f"{prompt_hash}.png")
 
-def run_batch_grading(file_obj, force_regenerate=False):
+def run_batch_grading(file_obj, force_regenerate=False, generate_missing=False):
     """Batch scoring with smart caching and auto-generation"""
     if not grading_enabled:
         return None, "⚠️ Azure OpenAI client not initialized. Check your configuration."
@@ -463,20 +463,40 @@ def run_batch_grading(file_obj, force_regenerate=False):
     if file_obj is None:
         return None, "⚠️ Please upload a CSV file with at least a 'prompt' column."
     
+    def make_error_result(prompt, category, image_name, status):
+        """Create a result dict with all columns for error cases"""
+        return {
+            "Prompt": prompt,
+            "Category": category,
+            "Image": image_name,
+            "Atoms Evaluated": 0,
+            "Soft-TIFA Score": 0.0,
+            "BRISQUE": 0.0,
+            "NIQE": 0.0,
+            "CLIP-IQA": 0.0,
+            "Toxicity Safety": 0.0,
+            "Fairness": 0.0,
+            "Privacy Safety": 0.0,
+            "Status": status
+        }
+    
     try:
-        # Read CSV - can have 'prompt' only OR 'prompt' + 'image_path'
+        # Read CSV - can have 'prompt' only OR 'prompt' + 'image_path' + optional 'category'
         df = pd.read_csv(file_obj.name)
         
         if 'prompt' not in df.columns:
             return None, "❌ CSV must contain a 'prompt' column."
         
-        # Check if we need to generate images
-        auto_generate = 'image_path' not in df.columns
+        # Check if we need to generate images or load from image_path
+        has_image_path = 'image_path' in df.columns
+        has_category = 'category' in df.columns
         
-        # Create cache directory for generated images
-        if auto_generate:
-            cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'batch_generated_images')
-            os.makedirs(cache_dir, exist_ok=True)
+        # Get the directory of the CSV file for resolving relative paths
+        csv_dir = os.path.dirname(os.path.abspath(file_obj.name))
+        
+        # Create cache directory for generated images (always create for fallback generation)
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'batch_generated_images')
+        os.makedirs(cache_dir, exist_ok=True)
         
         results = []
         generated_count = 0
@@ -484,9 +504,72 @@ def run_batch_grading(file_obj, force_regenerate=False):
         
         for idx, row in df.iterrows():
             prompt = row['prompt']
+            category = row['category'] if has_category else 'N/A'
             
-            # Generate or load cached image if needed
-            if auto_generate:
+            # Load image from image_path or generate if not provided
+            if has_image_path:
+                # Load existing image from provided path
+                try:
+                    img_path_raw = row['image_path']
+                    original_filename = os.path.basename(img_path_raw)
+                    
+                    # Handle relative paths - resolve relative to CSV file location
+                    if not os.path.isabs(img_path_raw):
+                        img_path = os.path.join(csv_dir, img_path_raw)
+                    else:
+                        img_path = img_path_raw
+                    
+                    # Check multiple locations for the image
+                    cache_path = os.path.join(cache_dir, original_filename)
+                    
+                    if os.path.exists(img_path):
+                        # Found at original path
+                        img = Image.open(img_path)
+                        print(f"✓ Loaded image {idx+1}/{len(df)}: {original_filename} (from: {img_path})")
+                        cached_count += 1
+                    elif os.path.exists(cache_path):
+                        # Found in batch_generated_images folder
+                        img = Image.open(cache_path)
+                        img_path = cache_path
+                        print(f"✓ Loaded from batch_generated_images {idx+1}/{len(df)}: {original_filename}")
+                        cached_count += 1
+                    elif generate_missing:
+                        # Image not found anywhere - generate with DALL-E 3
+                        print(f"🎨 Image not found, generating with DALL-E 3 for {idx+1}/{len(df)}: {prompt[:50]}...")
+                        try:
+                            # Generate image using DALL-E 3
+                            image_url = generate_image(prompt)
+                            response = requests.get(image_url)
+                            img = Image.open(BytesIO(response.content))
+                            
+                            # Save to batch_generated_images folder with original filename
+                            save_path = os.path.join(cache_dir, original_filename)
+                            img.save(save_path)
+                            img_path = save_path
+                            print(f"✅ Generated and saved to: {save_path}")
+                            
+                            generated_count += 1
+                        except Exception as gen_error:
+                            results.append(make_error_result(
+                                prompt, category, original_filename,
+                                f"❌ Image not found and generation failed: {str(gen_error)}"
+                            ))
+                            continue
+                    else:
+                        # Image not found and generate_missing is False
+                        results.append(make_error_result(
+                            prompt, category, original_filename,
+                            f"❌ Image not found: {img_path} (also checked: {cache_path})"
+                        ))
+                        continue
+                except Exception as e:
+                    results.append(make_error_result(
+                        prompt, category, "N/A",
+                        f"❌ Error loading image: {str(e)}"
+                    ))
+                    continue
+            else:
+                # Auto-generate mode - generate or use cached image
                 img_path = get_cached_image_path(prompt, cache_dir)
                 
                 # Check if image already exists in cache
@@ -505,11 +588,10 @@ def run_batch_grading(file_obj, force_regenerate=False):
                             img.save(img_path)
                             generated_count += 1
                         except Exception as gen_error:
-                            results.append({
-                                "Prompt": prompt,
-                                "Soft-TIFA Score": 0.0,
-                                "Status": f"❌ Generation failed: {str(gen_error)}"
-                            })
+                            results.append(make_error_result(
+                                prompt, category, "N/A",
+                                f"❌ Generation failed: {str(gen_error)}"
+                            ))
                             continue
                 else:
                     # Generate new image
@@ -524,24 +606,11 @@ def run_batch_grading(file_obj, force_regenerate=False):
                         generated_count += 1
                         
                     except Exception as e:
-                        results.append({
-                            "Prompt": prompt,
-                            "Soft-TIFA Score": 0.0,
-                            "Status": f"❌ Generation failed: {str(e)}"
-                        })
+                        results.append(make_error_result(
+                            prompt, category, "N/A",
+                            f"❌ Generation failed: {str(e)}"
+                        ))
                         continue
-            else:
-                # Load existing image from provided path
-                try:
-                    img_path = row['image_path']
-                    img = Image.open(img_path)
-                except Exception as e:
-                    results.append({
-                        "Prompt": prompt,
-                        "Soft-TIFA Score": 0.0,
-                        "Status": f"❌ Error loading image: {str(e)}"
-                    })
-                    continue
             
             # Stage 1: Extract atomic visual criteria
             extraction_prompt = f"""
@@ -570,12 +639,10 @@ Return ONLY a valid JSON object:
                 atoms_content = atoms_content.replace('```json', '').replace('```', '').strip()
                 atoms = json.loads(atoms_content)['atoms']
             except Exception as e:
-                results.append({
-                    "Prompt": prompt,
-                    "Image": os.path.basename(img_path),
-                    "Soft-TIFA Score": 0.0,
-                    "Status": f"⚠️ Error extracting atoms: {str(e)}"
-                })
+                results.append(make_error_result(
+                    prompt, category, os.path.basename(img_path),
+                    f"⚠️ Error extracting atoms: {str(e)}"
+                ))
                 continue
             
             # Stage 2: Grade image against each atom
@@ -652,7 +719,8 @@ Respond with ONLY a number between 0.0 and 1.0.
             
             results.append({
                 "Prompt": prompt,
-                "Image": os.path.basename(img_path),
+                "Category": category,
+                "Image": os.path.basename(img_path) if has_image_path else os.path.basename(img_path),
                 "Atoms Evaluated": len(atoms),
                 "Soft-TIFA Score": round(gm_score * 100, 2),
                 "BRISQUE": round(brisque_score, 2),
@@ -666,19 +734,19 @@ Respond with ONLY a number between 0.0 and 1.0.
         
         res_df = pd.DataFrame(results)
         
-        # Calculate average scores for different metric categories
-        avg_tifa = res_df['Soft-TIFA Score'].mean()
-        avg_brisque = res_df['BRISQUE'].mean()
-        avg_niqe = res_df['NIQE'].mean()
-        avg_clip_iqa = res_df['CLIP-IQA'].mean()
-        avg_toxicity = res_df['Toxicity Safety'].mean()
-        avg_fairness = res_df['Fairness'].mean()
-        avg_privacy = res_df['Privacy Safety'].mean()
+        # Calculate average scores for different metric categories (with safety checks)
+        avg_tifa = res_df['Soft-TIFA Score'].mean() if 'Soft-TIFA Score' in res_df.columns else 0.0
+        avg_brisque = res_df['BRISQUE'].mean() if 'BRISQUE' in res_df.columns else 0.0
+        avg_niqe = res_df['NIQE'].mean() if 'NIQE' in res_df.columns else 0.0
+        avg_clip_iqa = res_df['CLIP-IQA'].mean() if 'CLIP-IQA' in res_df.columns else 0.0
+        avg_toxicity = res_df['Toxicity Safety'].mean() if 'Toxicity Safety' in res_df.columns else 0.0
+        avg_fairness = res_df['Fairness'].mean() if 'Fairness' in res_df.columns else 0.0
+        avg_privacy = res_df['Privacy Safety'].mean() if 'Privacy Safety' in res_df.columns else 0.0
         
         avg_technical_quality = (avg_brisque + avg_niqe + avg_clip_iqa) / 3
         avg_safety = (avg_toxicity + avg_fairness + avg_privacy) / 3
         
-        if auto_generate:
+        if not has_image_path:
             summary = f"""📊 **Batch Complete:** {len(results)} images evaluated
 
 **Generation Summary:**
@@ -706,8 +774,16 @@ Respond with ONLY a number between 0.0 and 1.0.
 💡 **Tip:** Images are cached! Re-running with the same prompts will use cached images (saves cost & time).
 """
         else:
+            mode_desc = "Loading images from `image_path` column"
+            if generate_missing and generated_count > 0:
+                mode_desc += f" (generated {generated_count} missing images with DALL-E 3)"
+            
             summary = f"""📊 **Batch Complete:** {len(results)} images evaluated
-**Mode:** Existing Images
+**Mode:** {mode_desc}
+
+**Image Summary:**
+- 📁 Loaded from disk: {cached_count}
+- 🎨 Generated (missing images): {generated_count}
 
 **Average Scores by Category:**
 
@@ -819,45 +895,57 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
 - ✅ Only generates new images for new/changed prompts
 - ✅ Saves money and time on repeated evaluations
 
-**Two modes supported:**
+**Three modes supported:**
 
-**Mode 1: Auto-Generate Images** (Recommended)
-- CSV with only `prompt` column
+**Mode 1: Auto-Generate Images**
+- CSV with only `prompt` column (and optional `category`)
 - App generates images automatically using DALL-E 3
 - Saves to `batch_generated_images/` folder with smart caching
 
-**Mode 2: Grade Existing Images**
-- CSV with `prompt` and `image_path` columns
-- Grades pre-generated images from specified paths
+**Mode 2: Grade Existing Images** (For pre-generated images)
+- CSV with `prompt`, `image_path`, and optional `category` columns
+- Loads images from specified paths (supports relative paths from CSV location)
+- Use this mode when you already have images to evaluate
+
+**Mode 3: Hybrid - Generate Missing Images** ✨ NEW
+- CSV with `prompt`, `image_path`, and optional `category` columns
+- Check the "🎨 Generate Missing Images" checkbox
+- If an image doesn't exist at the path, it generates with DALL-E 3
+- Perfect for evaluating a mix of existing + new images!
 
 **Example CSV (Mode 1 - Auto-generate):**
 ```
-prompt
-"A red cat on a blue sofa"
-"A woman with blonde hair"
-"A scenic mountain landscape"
+prompt,category
+"A red cat on a blue sofa",simple
+"A woman with blonde hair",portrait
+"A scenic mountain landscape",landscape
 ```
 
-**Example CSV (Mode 2 - Existing images):**
+**Example CSV (Mode 2/3 - Existing images):**
 ```
-prompt,image_path
-"A red cat on a blue sofa",./images/image1.png
-"A woman with blonde hair",./images/image2.png
+prompt,image_path,category
+"A red cat on a blue sofa",./images/image1.png,simple
+"A woman with blonde hair",./images/image2.png,portrait
 ```
 
-💡 **Pro Tip:** Run once to generate images, then experiment with different grading approaches without regenerating!
+💡 **Pro Tip:** Paths in `image_path` can be relative to the CSV file location or absolute paths!
             """)
             b_file = gr.File(label="Upload Dataset (CSV)", file_types=[".csv"])
             
             with gr.Row():
                 b_btn = gr.Button("🚀 Run Batch Benchmarking", variant="primary", size="lg")
                 b_force_regen = gr.Checkbox(label="Force Regenerate (ignore cache)", value=False)
+                b_generate_missing = gr.Checkbox(
+                    label="🎨 Generate Missing Images (DALL-E 3)", 
+                    value=False,
+                    info="If an image in image_path doesn't exist, generate it with DALL-E 3"
+                )
             
             gr.Markdown("### Results")
             b_summary = gr.Markdown(label="Summary", value="*Upload a CSV and click 'Run Batch Benchmarking' to start.*")
             b_table = gr.Dataframe(label="Detailed Scores", wrap=True)
             
-            b_btn.click(run_batch_grading, [b_file, b_force_regen], [b_table, b_summary])
+            b_btn.click(run_batch_grading, [b_file, b_force_regen, b_generate_missing], [b_table, b_summary])
         
         with gr.TabItem("📖 Metrics Guide"):
             gr.Markdown("""
