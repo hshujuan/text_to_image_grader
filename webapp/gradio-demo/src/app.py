@@ -473,7 +473,7 @@ def run_batch_grading(file_obj, force_regenerate=False, generate_missing=False):
             "Image": image_name,
             "Atoms Evaluated": 0,
             "Soft-TIFA Score": 0.0,
-            "Pass/Fail": "❌ Fail",
+            "Pass/Fail": "Fail",
             "BRISQUE": 0.0,
             "NIQE": 0.0,
             "CLIP-IQA": 0.0,
@@ -721,7 +721,7 @@ Respond with ONLY a number between 0.0 and 1.0.
                 privacy_score = 100.0
             
             tifa_score = round(gm_score * 100, 2)
-            pass_fail = "✅ Pass" if tifa_score >= PASS_THRESHOLD else "❌ Fail"
+            pass_fail = "Pass" if tifa_score >= PASS_THRESHOLD else "Fail"
             
             results.append({
                 "Prompt": prompt,
@@ -736,7 +736,7 @@ Respond with ONLY a number between 0.0 and 1.0.
                 "Toxicity Safety": round(toxicity_score, 2),
                 "Fairness": round(fairness_score, 2),
                 "Privacy Safety": round(privacy_score, 2),
-                "Status": "✅ Complete"
+                "Status": "Complete"
             })
         
         res_df = pd.DataFrame(results)
@@ -755,7 +755,7 @@ Respond with ONLY a number between 0.0 and 1.0.
         
         # Calculate pass rate
         if 'Pass/Fail' in res_df.columns:
-            pass_count = (res_df['Pass/Fail'] == '✅ Pass').sum()
+            pass_count = (res_df['Pass/Fail'] == 'Pass').sum()
             total_count = len(res_df)
             pass_rate = (pass_count / total_count * 100) if total_count > 0 else 0
         else:
@@ -822,10 +822,18 @@ Respond with ONLY a number between 0.0 and 1.0.
 - **Average:** {avg_safety:.2f}/100
 """
         
-        return res_df, summary
+        # Save results to a downloadable CSV file
+        import tempfile
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_filename = f"batch_results_{timestamp}.csv"
+        csv_path = os.path.join(tempfile.gettempdir(), csv_filename)
+        res_df.to_csv(csv_path, index=False)
+        
+        return res_df, summary, csv_path
         
     except Exception as e:
-        return None, f"❌ **Batch Error:** {str(e)}"
+        return None, f"❌ **Batch Error:** {str(e)}", None
 
 def infer(prompt):
     try:
@@ -972,8 +980,9 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
             gr.Markdown("### Results")
             b_summary = gr.Markdown(label="Summary", value="*Upload a CSV and click 'Run Batch Benchmarking' to start.*")
             b_table = gr.Dataframe(label="Detailed Scores", wrap=True)
+            b_download = gr.File(label="📥 Download Results (CSV)", visible=True)
             
-            b_btn.click(run_batch_grading, [b_file, b_force_regen, b_generate_missing], [b_table, b_summary])
+            b_btn.click(run_batch_grading, [b_file, b_force_regen, b_generate_missing], [b_table, b_summary, b_download])
         
         with gr.TabItem("📖 Metrics Guide"):
             gr.Markdown("""
