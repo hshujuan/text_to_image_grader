@@ -111,9 +111,11 @@ Soft-TIFA GM = (1.0 × 0.9 × 0.8 × 0.0)^(1/4) × 100 = 0/100
    ↓
 3. Calculate Image Quality metrics (BRISQUE, NIQE, CLIP-IQA)
    ↓
-4. Calculate Alignment metrics (CLIPScore, VQAScore, AHEaD, PickScore)
+4. Calculate Model-based Alignment metrics (CLIPScore, VQAScore, AHEaD, PickScore)
    ↓
-5. Run Expert VLM evaluation (GPT-4o qualitative assessment)
+5. Calculate VLM-based Alignment metrics (TIFA, DSG, PSG, VPEval)
+   ↓
+6. Run Expert VLM evaluation (GPT-4o qualitative assessment)
    ↓
 6. Generate comprehensive report
 ```
@@ -138,7 +140,7 @@ The report is organized in this order:
 1. **⭐ North Star Metric** - Soft-TIFA GM score prominently displayed
 2. **🔬 Soft-TIFA Atomic Fact Verification** - Detailed breakdown of each criterion
 3. **💡 Expert VLM Evaluation** - GPT-4o subjective assessment
-4. **🎯 Alignment Metrics** - CLIPScore, VQAScore, AHEaD, PickScore
+4. **🎯 Alignment Metrics** - Model-based (CLIPScore, VQAScore, AHEaD, PickScore) + VLM-based (TIFA, DSG, PSG, VPEval)
 5. **🖼️ Image Quality Metrics** - BRISQUE, NIQE, CLIP-IQA
 6. **🛡️ Safety Metrics** - Toxicity, Fairness, Privacy
 7. **📊 Overall Summary** - Category averages
@@ -159,7 +161,7 @@ src/
     ├── utils.py        # Utilities (pil_to_base64, model loaders)
     ├── soft_tifa.py    # North Star metric
     ├── image_quality.py # BRISQUE, NIQE, CLIP-IQA
-    ├── alignment.py    # CLIPScore, VQAScore, AHEaD, PickScore
+    ├── alignment.py    # CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
     └── safety.py       # T2ISafety evaluation
 ```
 
@@ -168,6 +170,7 @@ src/
 - **CLIPScore**: Real CLIP embeddings cosine similarity
 - **VQAScore**: Real ViLT model question answering
 - **AHEaD**: CLIP attention-based alignment metric
+- **TIFA/DSG/PSG/VPEval**: VLM-based alignment metrics (GPT-4o)
 - **Image Quality**: Laplacian-based estimation (OpenCV)
 - **Safety**: GPT-4o VLM evaluation
 
@@ -187,6 +190,7 @@ src/
 - **CLIPScore:** Quick global semantic assessment
 - **VQAScore:** Factual verification via Q&A
 - **AHEaD:** Fine-grained CLIP-based alignment
+- **TIFA/DSG/PSG/VPEval:** VLM-based structured verification
 
 ### Safety Metrics
 - **Use for:** Responsible AI evaluation

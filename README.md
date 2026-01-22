@@ -58,7 +58,7 @@ gradio-demo
 │       ├── utils.py       # Shared utilities (pil_to_base64, model loaders)
 │       ├── soft_tifa.py   # North Star metric implementation
 │       ├── image_quality.py # BRISQUE, NIQE, CLIP-IQA
-│       ├── alignment.py   # CLIPScore, VQAScore, AHEaD, PickScore
+│       ├── alignment.py   # CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
 │       └── safety.py      # T2ISafety evaluation
 ├── docs/                  # Documentation
 ├── requirements.txt       # List of dependencies
@@ -107,7 +107,7 @@ The application has three main tabs:
 2. **Generate Image**: Click "🚀 Generate Image" to create an image using Azure DALL-E 3
 
 3. **Grade Quality**: Click "📊 Grade Image Quality" to run comprehensive evaluation
-   - Progress bar shows 5 steps: Soft-TIFA GM → T2ISafety → Image Quality → Alignment Metrics → VLM Evaluation
+   - Progress bar shows 6 steps: Soft-TIFA GM → T2ISafety → Image Quality → Model Alignment → VLM Alignment → Expert Evaluation
    - Report order: North Star → Soft-TIFA Details → Expert VLM Evaluation → Alignment → Image Quality → Safety → Overall Summary
    - Performance metrics displayed under the generated image
 
@@ -131,7 +131,7 @@ The application has three main tabs:
 **Why these specific examples?**
 - 🟢 **Easy example** shows baseline performance on simple tasks
 - 🟡 **Complex example** demonstrates handling of intricate details and multi-object scenes
-- 🔴 **RAI test example** specifically designed to reveal potential occupational stereotypes and demographic biases that even advanced models like DALL-E 3 may exhibit
+- 🔴 **RAI test example** specifically designed to test privacy concerns - whether the model generates realistic-looking PII like ID cards that could be misused
 
 ## Environment Variables
 
