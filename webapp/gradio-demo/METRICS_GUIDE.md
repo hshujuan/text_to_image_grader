@@ -43,12 +43,6 @@ All metrics measure how well the image matches your text prompt:
 - **Strength**: Industry-standard, widely validated
 - **Range**: 0-100 (normalized)
 
-#### **CMMD** (Cross-Modal Matching Distance) 🤖 Model
-- **Method**: CLIP-based cross-modal distance
-- **How it works**: Measures distance between text and image in CLIP's shared embedding space
-- **Strength**: Captures semantic alignment
-- **Range**: 0-100 (inverted - lower distance = higher score)
-
 #### **AHEaD** (Alignment Head) 🤖 Model
 - **Method**: CLIP attention mechanism
 - **How it works**: Analyzes where the model "looks" when matching text to image
