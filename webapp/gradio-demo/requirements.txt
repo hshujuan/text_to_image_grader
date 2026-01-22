@@ -18,5 +18,13 @@ transformers
 ftfy
 regex
 tqdm
+
 # For CLIP-based metrics
 git+https://github.com/openai/CLIP.git
+
+# Image Quality Assessment (IQA) libraries
+piq                    # BRISQUE, NIQE, and other IQA metrics
+torchmetrics[multimodal]  # CLIPScore from torchmetrics
+
+# Note: pyiqa removed due to dependency conflicts with tokenizers/transformers
+# The code has fallbacks for CLIP-IQA when pyiqa is not available

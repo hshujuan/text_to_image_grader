@@ -5,10 +5,10 @@ Alignment Metrics (Text-Image Correspondence)
 These metrics measure how well the generated image matches the text prompt.
 
 Metrics:
-- CLIPScore: Global semantic alignment via embedding cosine similarity
+- CLIPScore: Global semantic alignment via embedding cosine similarity (torchmetrics)
 - VQAScore: Visual Question Answering based verification
 - AHEaD: Attention-based Head alignment score
-- PickScore: Human preference estimation (proxy)
+- PickScore: Human preference estimation (HuggingFace model)
 - TIFA: Text-to-Image Faithfulness via QA
 - DSG: Davidsonian Scene Graph decomposition
 - PSG: Panoptic Scene Graph evaluation
@@ -17,12 +17,42 @@ Metrics:
 
 import json
 import numpy as np
+import torch
 from .utils import get_clip_model, get_vqa_model, pil_to_base64
+
+# Try importing torchmetrics for CLIPScore
+try:
+    from torchmetrics.multimodal.clip_score import CLIPScore as TorchMetricsCLIPScore
+    TORCHMETRICS_AVAILABLE = True
+    _torchmetrics_clip = None  # Lazy loaded
+except ImportError:
+    TORCHMETRICS_AVAILABLE = False
+    print("Warning: torchmetrics not available. Install with: pip install torchmetrics[multimodal]")
+
+# Try importing PickScore model
+try:
+    from transformers import AutoProcessor, AutoModel
+    PICKSCORE_AVAILABLE = True
+    _pickscore_model = None
+    _pickscore_processor = None
+except ImportError:
+    PICKSCORE_AVAILABLE = False
+    print("Warning: transformers not available for PickScore")
+
+
+def _pil_to_tensor_rgb(image):
+    """Convert PIL image to torch tensor (BCHW format, 0-255 uint8 for torchmetrics)."""
+    img_array = np.array(image)
+    if len(img_array.shape) == 2:
+        img_array = np.stack([img_array] * 3, axis=-1)
+    # torchmetrics CLIPScore expects uint8 in range 0-255
+    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)
+    return img_tensor
 
 
 def calculate_real_clipscore(image, prompt):
     """
-    Calculate real CLIPScore using CLIP embeddings.
+    Calculate real CLIPScore using torchmetrics library.
     
     CLIPScore measures global semantic alignment between image and text
     by computing cosine similarity of their CLIP embeddings.
@@ -34,8 +64,30 @@ def calculate_real_clipscore(image, prompt):
     Returns:
         float: CLIP score 0-100
     """
+    global _torchmetrics_clip
+    
+    if TORCHMETRICS_AVAILABLE:
+        try:
+            # Lazy load the model
+            if _torchmetrics_clip is None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                _torchmetrics_clip = TorchMetricsCLIPScore(model_name_or_path="openai/clip-vit-base-patch32").to(device)
+            
+            img_tensor = _pil_to_tensor_rgb(image)
+            device = next(_torchmetrics_clip.parameters()).device
+            img_tensor = img_tensor.to(device)
+            
+            # torchmetrics CLIPScore returns score * 100 (already scaled)
+            score = _torchmetrics_clip(img_tensor, [prompt]).item()
+            # Normalize to 0-100 range (CLIPScore typically ranges 0-40)
+            normalized_score = min(100, score * 2.5)
+            return normalized_score
+            
+        except Exception as e:
+            print(f"torchmetrics CLIPScore error: {e}, falling back to custom implementation")
+    
+    # Fallback to custom CLIP implementation
     try:
-        import torch
         import clip
         
         model, preprocess = get_clip_model()
@@ -45,25 +97,18 @@ def calculate_real_clipscore(image, prompt):
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Preprocess image
         image_input = preprocess(image).unsqueeze(0).to(device)
-        
-        # Tokenize text
         text_input = clip.tokenize([prompt]).to(device)
         
-        # Get features
         with torch.no_grad():
             image_features = model.encode_image(image_input)
             text_features = model.encode_text(text_input)
             
-            # Normalize features
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             
-            # Calculate cosine similarity
             similarity = (image_features @ text_features.T).item()
         
-        # Convert from [-1, 1] to [0, 100]
         clip_score = ((similarity + 1) / 2) * 100
         return clip_score
         
@@ -186,33 +231,67 @@ def calculate_ahead_score(image, prompt):
 
 def calculate_pickscore_proxy(image, prompt):
     """
-    PickScore proxy using CLIP + aesthetic features.
+    Calculate PickScore using the official HuggingFace PickScore model.
     
-    Real PickScore requires the trained PickScore model. This implementation
-    combines CLIP alignment with aesthetic indicators as a proxy.
+    PickScore is trained on human preferences for text-to-image alignment.
+    Falls back to CLIP+aesthetics proxy if model unavailable.
     
     Args:
         image: PIL Image to evaluate
         prompt: Text prompt
     
     Returns:
-        float: Estimated human preference score 0-100
+        float: Human preference score 0-100
     """
+    global _pickscore_model, _pickscore_processor
+    
+    if PICKSCORE_AVAILABLE:
+        try:
+            # Lazy load the model
+            if _pickscore_model is None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                _pickscore_processor = AutoProcessor.from_pretrained("yuvalkirstain/PickScore_v1")
+                _pickscore_model = AutoModel.from_pretrained("yuvalkirstain/PickScore_v1").eval().to(device)
+            
+            device = next(_pickscore_model.parameters()).device
+            
+            # Process inputs
+            inputs = _pickscore_processor(
+                images=image,
+                text=prompt,
+                return_tensors="pt",
+                padding=True
+            ).to(device)
+            
+            with torch.no_grad():
+                # Get image and text embeddings
+                image_embeds = _pickscore_model.get_image_features(pixel_values=inputs["pixel_values"])
+                text_embeds = _pickscore_model.get_text_features(input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
+                
+                # Normalize
+                image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
+                text_embeds = text_embeds / text_embeds.norm(dim=-1, keepdim=True)
+                
+                # Calculate score
+                score = (image_embeds @ text_embeds.T).item()
+            
+            # PickScore typically ranges from -1 to 1, normalize to 0-100
+            pick_score = ((score + 1) / 2) * 100
+            return min(100, max(0, pick_score))
+            
+        except Exception as e:
+            print(f"PickScore model error: {e}, falling back to proxy")
+    
+    # Fallback: CLIP + aesthetics proxy
     try:
-        # Use CLIP score as base
         clip_score = calculate_real_clipscore(image, prompt)
         
-        # Add aesthetic component
         img_array = np.array(image)
-        
-        # Color diversity
         colors = img_array.reshape(-1, 3)
         color_std = np.std(colors, axis=0).mean()
         color_score = min(100, color_std * 2)
         
-        # Combine: 70% alignment, 30% aesthetics
         pick_proxy = clip_score * 0.7 + color_score * 0.3
-        
         return pick_proxy
         
     except Exception as e:

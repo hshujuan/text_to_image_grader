@@ -1,123 +1,75 @@
-"""
-Soft-TIFA GM: North Star Metric for Text-to-Image Quality Assessment
-=====================================================================
-
-Soft-TIFA (Soft Text-Image Faithfulness through Atomic evaluation) measures 
-how well an image satisfies atomic visual criteria extracted from the prompt.
-
-Methodology:
-1. Extract 5-7 atomic visual facts from prompt
-2. Score each atom probabilistically (0.0 to 1.0)
-3. Calculate Geometric Mean: (score₁ × score₂ × ... × scoreₙ)^(1/n) × 100
-
-Why Geometric Mean?
-- Compositional AND logic: ALL criteria must be satisfied
-- Penalizes missing elements (single 0 = overall 0)
-- Better correlation with human judgment on completeness
-"""
-
 import json
+import re
 import numpy as np
+from typing import List, Tuple
 from .utils import pil_to_base64
 
-
-def calculate_soft_tifa_score(image, prompt, client, model):
+def calculate_soft_tifa_pure_gm(image, prompt, client, model) -> Tuple[float, List[str], List[float]]:
     """
-    Calculate true Soft-TIFA Geometric Mean score.
-    
-    This is the NORTH STAR METRIC for text-to-image evaluation.
-    
-    Args:
-        image: PIL Image to evaluate
-        prompt: Original text prompt
-        client: Azure OpenAI client instance
-        model: Model deployment name (e.g., "gpt-4o")
-    
-    Returns:
-        tuple: (gm_score, atoms_list, individual_scores)
-            - gm_score: Geometric mean score (0-100)
-            - atoms_list: List of extracted atomic criteria
-            - individual_scores: List of scores for each atom (0.0-1.0)
+    Pure Geometric Mean Soft-TIFA.
+    A single 0.0 will result in a 0.0 total score. 
+    The VQA prompt is enhanced to prevent 'accidental' zeros.
     """
-    # Stage 1: Extract atomic visual criteria
+    # 1. Atomic Fact Extraction
     extraction_prompt = f"""
-Analyze this text-to-image prompt: "{prompt}"
-
-Extract 5-7 atomic visual facts that MUST be present in the generated image.
-Focus on: objects, attributes (colors, styles), spatial relationships, and composition.
-
-Return ONLY a valid JSON object:
-{{"atoms": ["fact 1", "fact 2", "fact 3", ...]}}
-"""
+    Decompose this prompt into 5-7 atomic, visually verifiable facts: "{prompt}"
+    Return ONLY JSON: {{"atoms": ["fact1", "fact2"]}}
+    """
     
     try:
-        atoms_response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": "You are a prompt analysis expert. Extract atomic visual criteria."},
-                {"role": "user", "content": extraction_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=500
+            messages=[{"role": "user", "content": extraction_prompt}],
+            temperature=0.0
         )
-        if not atoms_response.choices or len(atoms_response.choices) == 0:
-            print("No response received from atom extraction")
-            return 0.0, [], []
-        
-        atoms_content = atoms_response.choices[0].message.content.strip()
-        atoms_content = atoms_content.replace('```json', '').replace('```', '').strip()
-        atoms = json.loads(atoms_content)['atoms']
-    except Exception as e:
-        print(f"Soft-TIFA atom extraction error: {e}")
+        json_str = re.search(r"\{.*\}", resp.choices[0].message.content, re.DOTALL).group(0)
+        atoms = list(dict.fromkeys(json.loads(json_str).get("atoms", [])))
+    except:
         return 0.0, [], []
-    
-    # Stage 2: Score each atom individually
-    img_base64 = pil_to_base64(image)
-    criteria_scores = []
+
+    # 2. Sophisticated Scoring Rubric
+    scores = []
+    img_b64 = pil_to_base64(image)
     
     for atom in atoms:
+        # We define a rubric to guide the model away from harsh 0.0s
         vqa_prompt = f"""
-Look at this image and evaluate if the following criterion is met:
-Criterion: "{atom}"
-
-Provide a probability score from 0.0 to 1.0:
-- 1.0 = Criterion fully met
-- 0.5 = Partially met
-- 0.0 = Not met at all
-
-Respond with ONLY a number between 0.0 and 1.0.
-"""
+        Evaluate the image based on this criterion: "{atom}"
         
+        Assign a score based on this strict rubric:
+        1.0: Perfect match.
+        0.7 - 0.9: Clearly present but minor attribute mismatch (e.g., wrong shade of color).
+        0.4 - 0.6: Partially present or obscured.
+        0.1 - 0.3: Distant hint or highly distorted version of the object is present.
+        0.0: The object/attribute is completely absent or replaced by something else.
+
+        Respond with ONLY the numerical score.
+        """
         try:
-            prob_response = client.chat.completions.create(
+            score_resp = client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": "You are a precise image evaluator. Respond with only a probability score."},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": vqa_prompt},
-                            {"type": "image_url", "image_url": {"url": img_base64}}
-                        ]
-                    }
-                ],
-                temperature=0.0,
-                max_tokens=10
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": vqa_prompt}, 
+                    {"type": "image_url", "image_url": {"url": img_b64}}
+                ]}],
+                temperature=0.0
             )
-            if prob_response.choices and len(prob_response.choices) > 0:
-                prob = float(prob_response.choices[0].message.content.strip())
-                prob = max(0.0, min(1.0, prob))
-                criteria_scores.append(prob)
-            else:
-                criteria_scores.append(0.0)
-        except Exception as e:
-            print(f"Error scoring criterion '{atom}': {e}")
-            criteria_scores.append(0.0)
+            val_match = re.search(r"(\d?\.\d+|\d)", score_resp.choices[0].message.content)
+            val = float(val_match.group(0)) if val_match else 0.0
+            scores.append(max(0.0, min(1.0, val)))
+        except:
+            scores.append(0.0)
+
+    # 3. Pure Geometric Mean (No epsilon floor)
+    # If any score is 0.0, np.prod will be 0.0.
+    if not scores:
+        return 0.0, atoms, []
     
-    # Stage 3: Calculate Geometric Mean
-    if criteria_scores:
-        gm_score = (np.prod(criteria_scores)) ** (1 / len(criteria_scores))
-    else:
-        gm_score = 0.0
+    # Mathematical GM: (p1 * p2 * ... * pn)^(1/n)
+    gm_score = np.prod(scores) ** (1 / len(scores))
     
-    return gm_score * 100, atoms, criteria_scores
+    return float(gm_score * 100), atoms, scores
+
+
+# Alias for backward compatibility with imports
+calculate_soft_tifa_score = calculate_soft_tifa_pure_gm

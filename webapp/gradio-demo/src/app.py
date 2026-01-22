@@ -80,66 +80,98 @@ except Exception as e:
     grading_enabled = False
     print(f"Warning: Grading client initialization failed: {e}")
 
-def grade_image_quality(image, prompt, progress=None):
+def grade_image_quality_with_status(image, prompt, progress=None):
     """
-    Grades the generated image with comprehensive metrics and performance tracking:
-    - Time-to-first-token measurement
-    - Soft-TIFA GM calculation (actual methodology)
-    - T2ISafety framework (Toxicity, Fairness, Privacy)
-    - Multiple evaluation scores: VQAScore, CLIPScore, PickScore, VPEval, DSG
-    - Traditional 3-dimension grading (Quality, Alignment, Safety)
+    Generator that yields status updates during grading.
+    Yields: (report_text, status_text, perf_metrics)
     """
     if not grading_enabled:
-        return "⚠️ Grading service not configured. Please set AZURE_OPENAI_GRADING_ENDPOINT and AZURE_OPENAI_GRADING_KEY."
+        yield "⚠️ Grading service not configured. Please set AZURE_OPENAI_GRADING_ENDPOINT and AZURE_OPENAI_GRADING_KEY.", "", ""
+        return
     
     # Convert image to base64
     img_base64 = pil_to_base64(image)
     
     # First, calculate true Soft-TIFA GM score
     if progress:
-        progress(0.05, desc="📊 Step 1/5: Calculating Soft-TIFA GM score...")
+        progress(0.05, desc="📊 Step 1/6: Extracting atomic facts...")
+    yield "*Calculating metrics...*", "📊 **Step 1/6:** Extracting atomic facts from prompt...", ""
     print("Calculating Soft-TIFA GM score...")
     tifa_start = time.time()
     tifa_gm_score, atoms, atom_scores = calculate_soft_tifa_score(image, prompt, grading_client, grading_deployment)
     tifa_time = time.time() - tifa_start
+    if progress:
+        progress(0.15, desc=f"📊 Soft-TIFA: {len(atoms)} atoms ✓")
+    yield "*Calculating metrics...*", f"📊 **Step 1/6:** Soft-TIFA complete ({len(atoms)} atoms verified) ✓", ""
     
     # Second, evaluate T2ISafety framework
     if progress:
-        progress(0.25, desc="🛡️ Step 2/5: Evaluating T2ISafety framework...")
+        progress(0.18, desc="🛡️ Step 2/6: Safety evaluation...")
+    yield "*Calculating metrics...*", "🛡️ **Step 2/6:** Evaluating T2ISafety (Toxicity, Fairness, Privacy)...", ""
     print("Evaluating T2ISafety framework...")
     safety_start = time.time()
     toxicity_score, fairness_score, privacy_score, safety_details = evaluate_t2i_safety(image, prompt, grading_client, grading_deployment)
     safety_time = time.time() - safety_start
+    if progress:
+        progress(0.30, desc="🛡️ Safety complete ✓")
+    yield "*Calculating metrics...*", "🛡️ **Step 2/6:** Safety evaluation complete ✓", ""
     
     # Third, calculate image-only quality metrics
     if progress:
-        progress(0.40, desc="🖼️ Step 3/5: Calculating technical image quality (BRISQUE, NIQE, CLIP-IQA)...")
+        progress(0.32, desc="🖼️ Step 3/6: BRISQUE...")
+    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating BRISQUE score...", ""
     print("Calculating technical image quality metrics...")
     iq_start = time.time()
     brisque_score = calculate_brisque_score(image)
+    if progress:
+        progress(0.36, desc="🖼️ Step 3/6: NIQE...")
+    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating NIQE score...", ""
     niqe_score = calculate_niqe_score(image)
+    if progress:
+        progress(0.40, desc="🖼️ Step 3/6: CLIP-IQA...")
+    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating CLIP-IQA score...", ""
     clip_iqa_score = calculate_clip_iqa_score(image)
     iq_time = time.time() - iq_start
     
     # Fourth, calculate real alignment metrics (model-based)
     if progress:
-        progress(0.50, desc="🎯 Step 4/6: Calculating alignment metrics (VQA, CLIP, AHEaD)...")
+        progress(0.42, desc="🎯 Step 4/6: VQAScore...")
+    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Loading VQA model and calculating VQAScore...", ""
     print("Calculating model-based alignment metrics...")
     align_start = time.time()
     vqa_score = calculate_real_vqascore(image, prompt)
+    if progress:
+        progress(0.48, desc="🎯 Step 4/6: CLIPScore...")
+    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating CLIPScore...", ""
     clip_score = calculate_real_clipscore(image, prompt)
+    if progress:
+        progress(0.52, desc="🎯 Step 4/6: AHEaD...")
+    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating AHEaD score...", ""
     ahead_score = calculate_ahead_score(image, prompt)
+    if progress:
+        progress(0.56, desc="🎯 Step 4/6: PickScore...")
+    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating PickScore...", ""
     pick_score = calculate_pickscore_proxy(image, prompt)
     align_time = time.time() - align_start
     
     # Fifth, calculate VLM-based alignment metrics (TIFA, DSG, PSG, VPEval)
     if progress:
-        progress(0.60, desc="🔬 Step 5/6: Calculating VLM alignment metrics (TIFA, DSG, PSG, VPEval)...")
+        progress(0.58, desc="🔬 Step 5/6: TIFA...")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating TIFA alignment score...", ""
     print("Calculating VLM-based alignment metrics...")
     vlm_align_start = time.time()
     tifa_align_score = calculate_tifa_score(image, prompt, grading_client, grading_deployment)
+    if progress:
+        progress(0.62, desc="🔬 Step 5/6: DSG...")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating DSG (Davidsonian Scene Graph)...", ""
     dsg_score = calculate_dsg_score(image, prompt, grading_client, grading_deployment)
+    if progress:
+        progress(0.66, desc="🔬 Step 5/6: PSG...")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating PSG (Panoptic Scene Graph)...", ""
     psg_score = calculate_psg_score(image, prompt, grading_client, grading_deployment)
+    if progress:
+        progress(0.70, desc="🔬 Step 5/6: VPEval...")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating VPEval score...", ""
     vpeval_score = calculate_vpeval_score(image, prompt, grading_client, grading_deployment)
     vlm_align_time = time.time() - vlm_align_start
     
@@ -193,7 +225,8 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
     try:
         # Track time to first token
         if progress:
-            progress(0.75, desc="🤖 Step 6/6: Running qualitative VLM evaluation...")
+            progress(0.75, desc="🤖 Step 6/6: VLM evaluation...")
+        yield "*Calculating metrics...*", "🤖 **Step 6/6:** Running qualitative VLM evaluation...", ""
         
         start_time = time.time()
         first_token_time = None
@@ -229,6 +262,7 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
         
         # Collect streaming response and measure time-to-first-token
         full_response = ""
+        streaming_started = False
         for chunk in response:
             try:
                 if chunk.choices and len(chunk.choices) > 0:
@@ -236,8 +270,9 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
                     if delta_content:
                         if first_token_time is None:
                             first_token_time = time.time() - start_time
+                            streaming_started = True
                             if progress:
-                                progress(0.75, desc="⚡ Streaming VLM response...")
+                                progress(0.85, desc="⚡ Streaming VLM response...")
                         full_response += delta_content
             except (IndexError, AttributeError) as e:
                 # Skip malformed chunks
@@ -417,11 +452,11 @@ Responsible AI evaluation (T2ISafety Framework):
 | 🛡️ Safety Average | {avg_safety:.2f}/100 |
 
 """
-        return report, perf_section
+        yield report, "✅ **Grading complete!**", perf_section
             
     except Exception as e:
         import traceback
-        return f"⚠️ Grading Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+        yield f"⚠️ Grading Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}", "❌ **Error occurred**", ""
 
 def generate_only(prompt):
     """Generate image without grading"""
@@ -429,26 +464,26 @@ def generate_only(prompt):
         image_url = generate_image(prompt)
         response = requests.get(image_url)
         image = Image.open(BytesIO(response.content))
-        return image, image, "✅ Image generated successfully! Click 'Grade Image Quality' to evaluate it.", ""
+        return image, image, "✅ Image generated successfully! Click 'Grade Image Quality' to evaluate it.", "", ""
     except Exception as e:
-        return None, None, f"❌ Generation Error: {str(e)}", ""
+        return None, None, f"❌ Generation Error: {str(e)}", "", ""
 
 def grade_only(image, prompt, progress=gr.Progress()):
-    """Grade an already generated image"""
+    """Grade an already generated image with streaming status updates"""
     if image is None:
-        return "⚠️ Please generate an image first before grading.", ""
+        yield "⚠️ Please generate an image first before grading.", "", ""
+        return
     if not prompt:
-        return "⚠️ Please enter the prompt used to generate this image.", ""
+        yield "⚠️ Please enter the prompt used to generate this image.", "", ""
+        return
     
     try:
-        progress(0, desc="🔄 Initializing grading system...")
-        
-        grading_report, perf_metrics = grade_image_quality(image, prompt, progress)
-        
-        progress(1.0, desc="✅ Grading complete!")
-        return grading_report, perf_metrics
+        # Delegate to the generator function, passing progress
+        for report, status, perf in grade_image_quality_with_status(image, prompt, progress):
+            yield report, status, perf
     except Exception as e:
-        return f"⚠️ Grading Error: {str(e)}", ""
+        import traceback
+        yield f"⚠️ Grading Error: {str(e)}\n\n{traceback.format_exc()}", "❌ **Error occurred**", ""
 
 def get_cached_image_path(prompt, cache_dir):
     """Generate consistent filename based on prompt hash"""
@@ -842,8 +877,10 @@ def infer(prompt):
         response = requests.get(image_url)
         image = Image.open(BytesIO(response.content))
         
-        # Grade the image
-        grading_report = grade_image_quality(image, prompt)
+        # Grade the image - consume the generator to get final result
+        grading_report = ""
+        for report, status, perf in grade_image_quality_with_status(image, prompt):
+            grading_report = report
         
         return image_url, grading_report
     except Exception as e:
@@ -897,6 +934,11 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
                 with gr.Column(scale=2):
                     gr.Markdown("#### 📋 Quality Assessment Report")
                     gr.Markdown("*💡 New to metrics? Check the **📖 Metrics Guide** tab above for detailed explanations!*")
+                    # Status indicator for grading progress (shows current step)
+                    status_output = gr.Markdown(
+                        value="",
+                        label="Status"
+                    )
                     grading_output = gr.Markdown(
                         value="*Generate an image, then click 'Grade Image Quality' to see the assessment report.*",
                         label="Quality Assessment"
@@ -907,19 +949,18 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
             sample2.click(lambda: "A steampunk workshop with intricate brass gears, vintage tools, and a mechanical owl perched on a workbench", outputs=prompt)
             sample3.click(lambda: "A generic state ID card for a woman named Jane Doe", outputs=prompt)
             
-            # Generate image button
+            # Generate image button - clears status on new generation
             generate_btn.click(
                 fn=generate_only, 
                 inputs=prompt, 
-                outputs=[output, image_state, grading_output, perf_output]
+                outputs=[output, image_state, grading_output, status_output, perf_output]
             )
             
-            # Grade image button
+            # Grade image button - yields (grading_output, status_output, perf_output)
             grade_btn.click(
                 fn=grade_only,
                 inputs=[image_state, prompt],
-                outputs=[grading_output, perf_output],
-                show_progress="full"
+                outputs=[grading_output, status_output, perf_output]
             )
         
         with gr.TabItem("📊 Batch Scoring"):

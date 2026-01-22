@@ -133,7 +133,82 @@ All use GPT-4o to analyze potential ethical and safety concerns:
 
 ---
 
-## 🚀 Tips for Better Results
+## � Implementation Details
+
+This section documents how each metric is calculated - whether using external open-source packages or custom implementations.
+
+### Image Quality Metrics
+
+| Metric | Primary Implementation | Package | Fallback |
+|--------|----------------------|---------|----------|
+| **BRISQUE** | ✅ External Package | `piq` library | Custom (OpenCV gradient analysis) |
+| **NIQE** | ✅ External Package | `piq` library | Custom (entropy + edge density) |
+| **CLIP-IQA** | ⚠️ Fallback Only | `pyiqa` (not installed)* | Custom (sharpness + contrast + color) |
+
+*`pyiqa` has dependency conflicts with modern `transformers` versions, so the fallback is used.
+
+### Alignment Metrics
+
+| Metric | Primary Implementation | Package | Fallback |
+|--------|----------------------|---------|----------|
+| **CLIPScore** | ✅ External Package | `torchmetrics.multimodal` | Custom (OpenAI CLIP embeddings) |
+| **PickScore** | ✅ External Package | HuggingFace `transformers` (`yuvalkirstain/PickScore_v1`) | CLIP + aesthetics proxy |
+| **VQAScore** | ✅ Custom | ViLT model via `transformers` | N/A |
+| **AHEaD** | ✅ Custom | OpenAI CLIP attention patterns | N/A |
+| **TIFA** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
+| **DSG** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
+| **PSG** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
+| **VPEval** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
+
+### North Star Metric
+
+| Metric | Implementation | Description |
+|--------|---------------|-------------|
+| **Soft-TIFA GM** | ✅ Custom | GPT-4o extracts atomic facts, then verifies each via VQA. Geometric mean of verification scores. |
+
+### Safety Metrics
+
+| Metric | Implementation | Description |
+|--------|---------------|-------------|
+| **Toxicity** | ✅ Custom | Azure OpenAI GPT-4o content analysis |
+| **Fairness** | ✅ Custom | Azure OpenAI GPT-4o bias detection |
+| **Privacy** | ✅ Custom | Azure OpenAI GPT-4o privacy check |
+
+### Package Dependencies
+
+```
+# Image Quality Assessment
+piq                    # BRISQUE, NIQE (official implementations)
+torchmetrics[multimodal]  # CLIPScore from TorchMetrics
+
+# Models
+transformers           # PickScore (HuggingFace), ViLT (VQA)
+clip (OpenAI)          # CLIP embeddings for AHEaD, fallback CLIPScore
+
+# VLM-Based Metrics
+azure-ai-inference     # GPT-4o for TIFA, DSG, PSG, VPEval, Safety, Soft-TIFA
+```
+
+### Why External Packages?
+
+| Package | Reason |
+|---------|--------|
+| `piq` | Battle-tested, GPU-accelerated, matches academic implementations |
+| `torchmetrics` | Standard ML metrics library, well-maintained, consistent API |
+| HuggingFace `transformers` | Access to pre-trained models (PickScore, ViLT) |
+
+### Fallback Strategy
+
+All metrics have graceful degradation:
+1. **Try external package** (most accurate)
+2. **Fall back to custom implementation** (if package unavailable)
+3. **Return 0.0 with warning** (if both fail)
+
+This ensures the app runs even if some packages aren't installed.
+
+---
+
+## �🚀 Tips for Better Results
 
 1. **Be specific in prompts**: "A woman with blue hair" → Soft-TIFA can verify specific facts
 2. **Check atoms that failed**: If Soft-TIFA is low, see which specific facts weren't captured
