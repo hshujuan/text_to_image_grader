@@ -12,6 +12,8 @@ import time
 from io import BytesIO
 from PIL import Image
 from openai import AzureOpenAI
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Optional imports with fallbacks for Python 3.14 compatibility
 try:
@@ -80,6 +82,39 @@ except Exception as e:
     grading_enabled = False
     print(f"Warning: Grading client initialization failed: {e}")
 
+
+# =============================================================================
+# Model Pre-warming (loads models at startup instead of during first grading)
+# =============================================================================
+_models_warmed = False
+
+def prewarm_models():
+    """Pre-load ML models at startup for faster first grading."""
+    global _models_warmed
+    if _models_warmed:
+        return
+    
+    print("🔥 Pre-warming models (this speeds up first grading)...")
+    start = time.time()
+    
+    # Pre-load CLIP model (used by AHEaD and fallback CLIPScore)
+    try:
+        get_clip_model()
+        print("  ✓ CLIP model loaded")
+    except Exception as e:
+        print(f"  ✗ CLIP model failed: {e}")
+    
+    # Pre-load VQA model (used by VQAScore and Soft-TIFA)
+    try:
+        get_vqa_model()
+        print("  ✓ VQA model loaded")
+    except Exception as e:
+        print(f"  ✗ VQA model failed: {e}")
+    
+    _models_warmed = True
+    print(f"🔥 Models pre-warmed in {time.time() - start:.1f}s")
+
+
 def grade_image_quality_with_status(image, prompt, progress=None):
     """
     Generator that yields status updates during grading.
@@ -116,43 +151,51 @@ def grade_image_quality_with_status(image, prompt, progress=None):
         progress(0.30, desc="🛡️ Safety complete ✓")
     yield "*Calculating metrics...*", "🛡️ **Step 2/6:** Safety evaluation complete ✓", ""
     
-    # Third, calculate image-only quality metrics
+    # Third, calculate image-only quality metrics (PARALLEL)
     if progress:
-        progress(0.32, desc="🖼️ Step 3/6: BRISQUE...")
-    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating BRISQUE score...", ""
-    print("Calculating technical image quality metrics...")
+        progress(0.32, desc="🖼️ Step 3/6: Image quality metrics...")
+    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating BRISQUE, NIQE, CLIP-IQA in parallel...", ""
+    print("Calculating technical image quality metrics (parallel)...")
     iq_start = time.time()
-    brisque_score = calculate_brisque_score(image)
-    if progress:
-        progress(0.36, desc="🖼️ Step 3/6: NIQE...")
-    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating NIQE score...", ""
-    niqe_score = calculate_niqe_score(image)
-    if progress:
-        progress(0.40, desc="🖼️ Step 3/6: CLIP-IQA...")
-    yield "*Calculating metrics...*", "🖼️ **Step 3/6:** Calculating CLIP-IQA score...", ""
-    clip_iqa_score = calculate_clip_iqa_score(image)
-    iq_time = time.time() - iq_start
     
-    # Fourth, calculate real alignment metrics (model-based)
+    # Run image quality metrics in parallel (they're independent)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        brisque_future = executor.submit(calculate_brisque_score, image)
+        niqe_future = executor.submit(calculate_niqe_score, image)
+        clipiqa_future = executor.submit(calculate_clip_iqa_score, image)
+        
+        brisque_score = brisque_future.result()
+        niqe_score = niqe_future.result()
+        clip_iqa_score = clipiqa_future.result()
+    
+    iq_time = time.time() - iq_start
     if progress:
-        progress(0.42, desc="🎯 Step 4/6: VQAScore...")
-    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Loading VQA model and calculating VQAScore...", ""
-    print("Calculating model-based alignment metrics...")
+        progress(0.40, desc="🖼️ Image quality complete ✓")
+    yield "*Calculating metrics...*", f"🖼️ **Step 3/6:** Image quality metrics complete (BRISQUE={brisque_score:.0f}, NIQE={niqe_score:.0f}, CLIP-IQA={clip_iqa_score:.0f}) ✓", ""
+    
+    # Fourth, calculate real alignment metrics (model-based) - PARALLEL where possible
+    if progress:
+        progress(0.42, desc="🎯 Step 4/6: Alignment metrics...")
+    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating VQAScore, CLIPScore, AHEaD, PickScore...", ""
+    print("Calculating model-based alignment metrics (parallel where possible)...")
     align_start = time.time()
-    vqa_score = calculate_real_vqascore(image, prompt)
-    if progress:
-        progress(0.48, desc="🎯 Step 4/6: CLIPScore...")
-    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating CLIPScore...", ""
-    clip_score = calculate_real_clipscore(image, prompt)
-    if progress:
-        progress(0.52, desc="🎯 Step 4/6: AHEaD...")
-    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating AHEaD score...", ""
-    ahead_score = calculate_ahead_score(image, prompt)
-    if progress:
-        progress(0.56, desc="🎯 Step 4/6: PickScore...")
-    yield "*Calculating metrics...*", "🎯 **Step 4/6:** Calculating PickScore...", ""
-    pick_score = calculate_pickscore_proxy(image, prompt)
+    
+    # VQAScore needs the VQA model, others need CLIP - run in parallel
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        vqa_future = executor.submit(calculate_real_vqascore, image, prompt)
+        clip_future = executor.submit(calculate_real_clipscore, image, prompt)
+        ahead_future = executor.submit(calculate_ahead_score, image, prompt)
+        pick_future = executor.submit(calculate_pickscore_proxy, image, prompt)
+        
+        vqa_score = vqa_future.result()
+        clip_score = clip_future.result()
+        ahead_score = ahead_future.result()
+        pick_score = pick_future.result()
+    
     align_time = time.time() - align_start
+    if progress:
+        progress(0.56, desc="🎯 Alignment metrics complete ✓")
+    yield "*Calculating metrics...*", f"🎯 **Step 4/6:** Alignment metrics complete ✓", ""
     
     # Fifth, calculate VLM-based alignment metrics (TIFA, DSG, PSG, VPEval)
     if progress:
@@ -1207,4 +1250,8 @@ All use GPT-4o to analyze potential ethical and safety concerns:
             """)
 
 if __name__ == "__main__":
+    # Pre-warm ML models at startup for faster first grading
+    print("=" * 60)
+    prewarm_models()
+    print("=" * 60)
     demo.launch(share=False)

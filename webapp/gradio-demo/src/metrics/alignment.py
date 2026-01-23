@@ -66,12 +66,18 @@ def calculate_real_clipscore(image, prompt):
     """
     global _torchmetrics_clip
     
-    if TORCHMETRICS_AVAILABLE:
+    # Check if we should use the faster OpenAI CLIP fallback (shares model with AHEaD)
+    import os
+    use_fast_clip = os.environ.get("USE_FAST_CLIPSCORE", "").lower() in ("1", "true", "yes")
+    
+    if TORCHMETRICS_AVAILABLE and not use_fast_clip:
         try:
             # Lazy load the model
             if _torchmetrics_clip is None:
+                print("Loading torchmetrics CLIPScore model...")
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 _torchmetrics_clip = TorchMetricsCLIPScore(model_name_or_path="openai/clip-vit-base-patch32").to(device)
+                print(f"torchmetrics CLIPScore loaded on {device}")
             
             img_tensor = _pil_to_tensor_rgb(image)
             device = next(_torchmetrics_clip.parameters()).device
@@ -86,7 +92,7 @@ def calculate_real_clipscore(image, prompt):
         except Exception as e:
             print(f"torchmetrics CLIPScore error: {e}, falling back to custom implementation")
     
-    # Fallback to custom CLIP implementation
+    # Fallback to custom CLIP implementation (faster, shares model with AHEaD)
     try:
         import clip
         
@@ -245,13 +251,21 @@ def calculate_pickscore_proxy(image, prompt):
     """
     global _pickscore_model, _pickscore_processor
     
+    # Check if PickScore is disabled via environment variable (saves ~4GB model download)
+    import os
+    if os.environ.get("SKIP_PICKSCORE", "").lower() in ("1", "true", "yes"):
+        # Use fast fallback
+        return _calculate_pickscore_fallback(image, prompt)
+    
     if PICKSCORE_AVAILABLE:
         try:
             # Lazy load the model
             if _pickscore_model is None:
+                print("Loading PickScore model (this is a large ~4GB model)...")
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 _pickscore_processor = AutoProcessor.from_pretrained("yuvalkirstain/PickScore_v1")
                 _pickscore_model = AutoModel.from_pretrained("yuvalkirstain/PickScore_v1").eval().to(device)
+                print(f"PickScore model loaded on {device}")
             
             device = next(_pickscore_model.parameters()).device
             
@@ -282,7 +296,11 @@ def calculate_pickscore_proxy(image, prompt):
         except Exception as e:
             print(f"PickScore model error: {e}, falling back to proxy")
     
-    # Fallback: CLIP + aesthetics proxy
+    return _calculate_pickscore_fallback(image, prompt)
+
+
+def _calculate_pickscore_fallback(image, prompt):
+    """Fast fallback using CLIP + aesthetics proxy."""
     try:
         clip_score = calculate_real_clipscore(image, prompt)
         

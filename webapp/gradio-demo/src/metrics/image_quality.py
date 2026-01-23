@@ -17,16 +17,19 @@ import torch
 try:
     import piq
     PIQ_AVAILABLE = True
+    # Check if NIQE is available (it's a class, not a function)
+    _piq_niqe = None
 except ImportError:
     PIQ_AVAILABLE = False
     print("Warning: piq not available. Install with: pip install piq")
 
-# Try importing pyiqa for CLIP-IQA
+# Try importing pyiqa for CLIP-IQA and NIQE
 try:
     import pyiqa
     PYIQA_AVAILABLE = True
-    # Pre-load CLIP-IQA model (lazy loading on first use)
+    # Pre-load models (lazy loading on first use)
     _clipiqa_model = None
+    _niqe_model = None
 except ImportError:
     PYIQA_AVAILABLE = False
     print("Warning: pyiqa not available. Install with: pip install pyiqa")
@@ -118,7 +121,7 @@ def calculate_niqe_score(image):
     """
     Calculate NIQE (Natural Image Quality Evaluator) score.
     
-    Uses the piq library for accurate NIQE calculation.
+    Uses the pyiqa library for accurate NIQE calculation.
     Lower raw NIQE scores indicate better quality (typically 0-10).
     We invert and normalize to 0-100 scale where higher is better.
     
@@ -128,17 +131,26 @@ def calculate_niqe_score(image):
     Returns:
         float: Quality score 0-100 (higher is better)
     """
-    if PIQ_AVAILABLE:
+    global _niqe_model
+    
+    # Try pyiqa first (more reliable NIQE implementation)
+    if PYIQA_AVAILABLE:
         try:
+            if _niqe_model is None:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                _niqe_model = pyiqa.create_metric('niqe', device=device)
+            
             img_tensor = _pil_to_tensor(image)
-            # piq.niqe returns lower scores for better quality (typically 0-10)
-            raw_score = piq.niqe(img_tensor, data_range=1.0).item()
+            if torch.cuda.is_available():
+                img_tensor = img_tensor.cuda()
+            
+            # pyiqa niqe returns lower scores for better quality (typically 0-10)
+            raw_score = _niqe_model(img_tensor).item()
             # Invert and scale: NIQE typically ranges 0-10, lower is better
-            # Map to 0-100 where higher is better
             quality_score = max(0, min(100, (10 - raw_score) * 10))
             return quality_score
         except Exception as e:
-            print(f"piq NIQE error: {e}, falling back to custom implementation")
+            print(f"pyiqa NIQE error: {e}, falling back to custom implementation")
     
     # Fallback implementation
     try:

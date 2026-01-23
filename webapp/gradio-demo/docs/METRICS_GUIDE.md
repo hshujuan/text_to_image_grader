@@ -142,10 +142,8 @@ This section documents how each metric is calculated - whether using external op
 | Metric | Primary Implementation | Package | Fallback |
 |--------|----------------------|---------|----------|
 | **BRISQUE** | ✅ External Package | `piq` library | Custom (OpenCV gradient analysis) |
-| **NIQE** | ✅ External Package | `piq` library | Custom (entropy + edge density) |
-| **CLIP-IQA** | ⚠️ Fallback Only | `pyiqa` (not installed)* | Custom (sharpness + contrast + color) |
-
-*`pyiqa` has dependency conflicts with modern `transformers` versions, so the fallback is used.
+| **NIQE** | ✅ External Package | `pyiqa` library | Custom (entropy + edge density) |
+| **CLIP-IQA** | ✅ External Package | `pyiqa` library | Custom (sharpness + contrast + color) |
 
 ### Alignment Metrics
 
@@ -178,7 +176,8 @@ This section documents how each metric is calculated - whether using external op
 
 ```
 # Image Quality Assessment
-piq                    # BRISQUE, NIQE (official implementations)
+piq                    # BRISQUE (official implementation)
+pyiqa                  # NIQE, CLIP-IQA (comprehensive IQA library)
 torchmetrics[multimodal]  # CLIPScore from TorchMetrics
 
 # Models
