@@ -50,6 +50,7 @@ from metrics import (
     calculate_dsg_score,
     calculate_psg_score,
     calculate_vpeval_score,
+    calculate_all_vlm_metrics_parallel,
     
     # Safety Metrics
     evaluate_t2i_safety,
@@ -198,24 +199,23 @@ def grade_image_quality_with_status(image, prompt, progress=None):
     yield "*Calculating metrics...*", f"🎯 **Step 4/6:** Alignment metrics complete ✓", ""
     
     # Fifth, calculate VLM-based alignment metrics (TIFA, DSG, PSG, VPEval)
+    # OPTIMIZED: Run all 4 metrics in parallel with batched verification
     if progress:
-        progress(0.58, desc="🔬 Step 5/6: TIFA...")
-    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating TIFA alignment score...", ""
-    print("Calculating VLM-based alignment metrics...")
+        progress(0.58, desc="🔬 Step 5/6: VLM metrics (parallel)...")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating VLM alignment metrics in parallel...", ""
+    print("Calculating VLM-based alignment metrics (parallel + batched)...")
     vlm_align_start = time.time()
-    tifa_align_score = calculate_tifa_score(image, prompt, grading_client, grading_deployment)
+    
+    # Single parallel call for all VLM metrics
+    vlm_results = calculate_all_vlm_metrics_parallel(image, prompt, grading_client, grading_deployment)
+    tifa_align_score = vlm_results["tifa"]
+    dsg_score = vlm_results["dsg"]
+    psg_score = vlm_results["psg"]
+    vpeval_score = vlm_results["vpeval"]
+    
     if progress:
-        progress(0.62, desc="🔬 Step 5/6: DSG...")
-    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating DSG (Davidsonian Scene Graph)...", ""
-    dsg_score = calculate_dsg_score(image, prompt, grading_client, grading_deployment)
-    if progress:
-        progress(0.66, desc="🔬 Step 5/6: PSG...")
-    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating PSG (Panoptic Scene Graph)...", ""
-    psg_score = calculate_psg_score(image, prompt, grading_client, grading_deployment)
-    if progress:
-        progress(0.70, desc="🔬 Step 5/6: VPEval...")
-    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating VPEval score...", ""
-    vpeval_score = calculate_vpeval_score(image, prompt, grading_client, grading_deployment)
+        progress(0.70, desc="🔬 Step 5/6: VLM metrics complete ✓")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** VLM alignment metrics complete ✓", ""
     vlm_align_time = time.time() - vlm_align_start
     
     grading_prompt = f"""

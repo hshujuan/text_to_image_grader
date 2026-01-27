@@ -18,7 +18,46 @@ Metrics:
 import json
 import numpy as np
 import torch
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from .utils import get_clip_model, get_vqa_model, pil_to_base64
+
+# =============================================================================
+# VLM Metrics Cache (for identical image+prompt pairs)
+# =============================================================================
+_vlm_metrics_cache = {}
+_cache_max_size = 100  # Maximum cache entries
+
+def _get_cache_key(image, prompt):
+    """Generate a cache key from image content and prompt."""
+    # Hash image bytes + prompt for unique key
+    img_bytes = image.tobytes()
+    key_data = hashlib.md5(img_bytes + prompt.encode()).hexdigest()
+    return key_data
+
+def _cache_get(key, metric_name):
+    """Get cached result for a specific metric."""
+    if key in _vlm_metrics_cache and metric_name in _vlm_metrics_cache[key]:
+        return _vlm_metrics_cache[key][metric_name]
+    return None
+
+def _cache_set(key, metric_name, value):
+    """Cache a metric result."""
+    global _vlm_metrics_cache
+    # Simple LRU: if cache is full, remove oldest entry
+    if len(_vlm_metrics_cache) >= _cache_max_size:
+        oldest_key = next(iter(_vlm_metrics_cache))
+        del _vlm_metrics_cache[oldest_key]
+    
+    if key not in _vlm_metrics_cache:
+        _vlm_metrics_cache[key] = {}
+    _vlm_metrics_cache[key][metric_name] = value
+
+def clear_vlm_cache():
+    """Clear the VLM metrics cache."""
+    global _vlm_metrics_cache
+    _vlm_metrics_cache = {}
 
 # Try importing torchmetrics for CLIPScore
 try:
@@ -321,6 +360,147 @@ def _calculate_pickscore_fallback(image, prompt):
 # VLM-Based Alignment Metrics (require Azure OpenAI client)
 # =============================================================================
 
+def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
+    """
+    Calculate all VLM-based metrics (TIFA, DSG, PSG, VPEval) in parallel.
+    
+    This is significantly faster than calling each metric sequentially.
+    Also uses caching to avoid recalculating for identical image+prompt pairs.
+    
+    Args:
+        image: PIL Image to evaluate
+        prompt: Text prompt
+        client: Azure OpenAI client instance
+        model: Model deployment name
+    
+    Returns:
+        dict: {"tifa": score, "dsg": score, "psg": score, "vpeval": score}
+    """
+    cache_key = _get_cache_key(image, prompt)
+    
+    # Check if all metrics are cached
+    cached_tifa = _cache_get(cache_key, "tifa")
+    cached_dsg = _cache_get(cache_key, "dsg")
+    cached_psg = _cache_get(cache_key, "psg")
+    cached_vpeval = _cache_get(cache_key, "vpeval")
+    
+    if all(v is not None for v in [cached_tifa, cached_dsg, cached_psg, cached_vpeval]):
+        print("Using cached VLM metrics")
+        return {
+            "tifa": cached_tifa,
+            "dsg": cached_dsg,
+            "psg": cached_psg,
+            "vpeval": cached_vpeval
+        }
+    
+    results = {}
+    
+    # Define metric functions to run in parallel
+    def run_tifa():
+        if cached_tifa is not None:
+            return ("tifa", cached_tifa)
+        score = calculate_tifa_score(image, prompt, client, model)
+        _cache_set(cache_key, "tifa", score)
+        return ("tifa", score)
+    
+    def run_dsg():
+        if cached_dsg is not None:
+            return ("dsg", cached_dsg)
+        score = calculate_dsg_score(image, prompt, client, model)
+        _cache_set(cache_key, "dsg", score)
+        return ("dsg", score)
+    
+    def run_psg():
+        if cached_psg is not None:
+            return ("psg", cached_psg)
+        score = calculate_psg_score(image, prompt, client, model)
+        _cache_set(cache_key, "psg", score)
+        return ("psg", score)
+    
+    def run_vpeval():
+        if cached_vpeval is not None:
+            return ("vpeval", cached_vpeval)
+        score = calculate_vpeval_score(image, prompt, client, model)
+        _cache_set(cache_key, "vpeval", score)
+        return ("vpeval", score)
+    
+    # Run all metrics in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(run_tifa),
+            executor.submit(run_dsg),
+            executor.submit(run_psg),
+            executor.submit(run_vpeval)
+        ]
+        
+        for future in as_completed(futures):
+            try:
+                metric_name, score = future.result()
+                results[metric_name] = score
+            except Exception as e:
+                print(f"Error in parallel VLM metric: {e}")
+    
+    # Ensure all keys exist
+    return {
+        "tifa": results.get("tifa", 0.0),
+        "dsg": results.get("dsg", 0.0),
+        "psg": results.get("psg", 0.0),
+        "vpeval": results.get("vpeval", 0.0)
+    }
+
+
+def _batch_verify_with_image(client, model, img_base64, verification_items):
+    """
+    Batch multiple verification requests into a single API call.
+    
+    Args:
+        client: Azure OpenAI client
+        model: Model deployment name
+        img_base64: Base64 encoded image
+        verification_items: List of dicts with 'prompt' and 'response_type' keys
+                           response_type can be 'yes_no' or 'score'
+    
+    Returns:
+        list: Results for each verification item
+    """
+    if not verification_items:
+        return []
+    
+    # Build batched prompt
+    batch_prompt = "Evaluate this image for the following checks. Respond with a JSON array.\n\n"
+    for i, item in enumerate(verification_items):
+        if item.get('response_type') == 'yes_no':
+            batch_prompt += f"{i+1}. {item['prompt']} (answer: yes/no)\n"
+        else:
+            batch_prompt += f"{i+1}. {item['prompt']} (answer: 0.0-1.0 score)\n"
+    
+    batch_prompt += "\nReturn ONLY a JSON array with your answers, e.g.: [\"yes\", 0.8, \"no\", 0.5]"
+    
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Evaluate images and return results as JSON array."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": batch_prompt},
+                    {"type": "image_url", "image_url": {"url": img_base64}}
+                ]}
+            ],
+            temperature=0.0,
+            max_tokens=200
+        )
+        
+        if response.choices:
+            content = response.choices[0].message.content.strip()
+            content = content.replace('```json', '').replace('```', '').strip()
+            results = json.loads(content)
+            return results
+    except Exception as e:
+        print(f"Batch verification error: {e}")
+    
+    # Return defaults on error
+    return [0.5 if item.get('response_type') != 'yes_no' else 'no' for item in verification_items]
+
 def calculate_tifa_score(image, prompt, client, model):
     """
     Calculate TIFA (Text-to-Image Faithfulness Assessment) score.
@@ -340,14 +520,15 @@ def calculate_tifa_score(image, prompt, client, model):
     try:
         # Generate QA pairs from prompt
         qa_prompt = f"""
-Analyze this text prompt and generate 5 verification questions with expected answers:
+Analyze this text prompt and generate 3 verification questions with expected answers:
 Prompt: "{prompt}"
 
 Generate questions that can be answered by looking at the image.
 Return ONLY valid JSON:
 {{"qa_pairs": [
     {{"question": "Q1?", "expected": "expected answer"}},
-    {{"question": "Q2?", "expected": "expected answer"}}
+    {{"question": "Q2?", "expected": "expected answer"}},
+    {{"question": "Q3?", "expected": "expected answer"}}
 ]}}
 """
         
@@ -368,34 +549,25 @@ Return ONLY valid JSON:
         qa_content = qa_content.replace('```json', '').replace('```', '').strip()
         qa_pairs = json.loads(qa_content)['qa_pairs']
         
-        # Verify each QA pair against the image
+        # OPTIMIZED: Batch verify all QA pairs in a single API call
         img_base64 = pil_to_base64(image)
-        correct = 0
         
+        # Build batch verification items
+        verification_items = []
         for qa in qa_pairs:
-            verify_prompt = f"""
-Look at this image and answer: {qa['question']}
-Expected answer: {qa['expected']}
-
-Does the image support this expected answer? Reply with just "yes" or "no".
-"""
-            verify_response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "Answer visual verification questions."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": verify_prompt},
-                        {"type": "image_url", "image_url": {"url": img_base64}}
-                    ]}
-                ],
-                temperature=0.0,
-                max_tokens=10
-            )
-            
-            if verify_response.choices:
-                answer = verify_response.choices[0].message.content.strip().lower()
-                if 'yes' in answer:
-                    correct += 1
+            verification_items.append({
+                'prompt': f"Q: {qa['question']} Expected: {qa['expected']} - Does the image support this?",
+                'response_type': 'yes_no'
+            })
+        
+        # Single batched API call instead of N separate calls
+        batch_results = _batch_verify_with_image(client, model, img_base64, verification_items)
+        
+        # Count correct answers
+        correct = 0
+        for result in batch_results:
+            if isinstance(result, str) and 'yes' in result.lower():
+                correct += 1
         
         return (correct / len(qa_pairs)) * 100 if qa_pairs else 0.0
         
@@ -456,36 +628,32 @@ Return ONLY valid JSON:
         dsg_content = dsg_content.replace('```json', '').replace('```', '').strip()
         primitives = json.loads(dsg_content)['primitives']
         
-        # Verify each primitive
+        # OPTIMIZED: Batch verify all primitives in a single API call
         img_base64 = pil_to_base64(image)
-        scores = []
         
+        # Build batch verification items
+        verification_items = []
         for prim in primitives:
-            verify_prompt = f"""
-Evaluate if this {prim['type']} is present in the image:
-"{prim['content']}"
-
-Rate confidence 0.0-1.0. Reply with just the number.
-"""
-            verify_response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "Rate visual element presence."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": verify_prompt},
-                        {"type": "image_url", "image_url": {"url": img_base64}}
-                    ]}
-                ],
-                temperature=0.0,
-                max_tokens=10
-            )
-            
-            if verify_response.choices:
-                try:
-                    score = float(verify_response.choices[0].message.content.strip())
-                    scores.append(min(1.0, max(0.0, score)))
-                except:
+            verification_items.append({
+                'prompt': f"Is this {prim['type']} present: \"{prim['content']}\"? Rate confidence",
+                'response_type': 'score'
+            })
+        
+        # Single batched API call instead of N separate calls
+        batch_results = _batch_verify_with_image(client, model, img_base64, verification_items)
+        
+        # Parse scores
+        scores = []
+        for result in batch_results:
+            try:
+                if isinstance(result, (int, float)):
+                    scores.append(min(1.0, max(0.0, float(result))))
+                elif isinstance(result, str):
+                    scores.append(min(1.0, max(0.0, float(result))))
+                else:
                     scores.append(0.5)
+            except:
+                scores.append(0.5)
         
         return np.mean(scores) * 100 if scores else 0.0
         
@@ -649,37 +817,36 @@ Return ONLY valid JSON:
         vp_content = vp_content.replace('```json', '').replace('```', '').strip()
         program = json.loads(vp_content)['program']
         
-        # Execute visual program
-        scores = []
+        # OPTIMIZED: Batch execute all visual program steps in a single API call
+        verification_items = []
         for step in program:
-            exec_prompt = f"""
-Execute this visual check on the image:
-Step type: {step['step']}
-Target: {step['target']}
-Check: {step['description']}
-
-Rate how well the image passes this check (0-100).
-Reply with just the number.
-"""
-            exec_response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "Execute visual verification steps."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": exec_prompt},
-                        {"type": "image_url", "image_url": {"url": img_base64}}
-                    ]}
-                ],
-                temperature=0.0,
-                max_tokens=10
-            )
-            
-            if exec_response.choices:
-                try:
-                    score = float(exec_response.choices[0].message.content.strip())
+            verification_items.append({
+                'prompt': f"Check [{step['step']}] - Target: {step['target']} - Verify: {step['description']} (rate 0-100)",
+                'response_type': 'score'
+            })
+        
+        # Single batched API call instead of N separate calls
+        batch_results = _batch_verify_with_image(client, model, img_base64, verification_items)
+        
+        # Parse scores (VPEval uses 0-100 scale)
+        scores = []
+        for result in batch_results:
+            try:
+                if isinstance(result, (int, float)):
+                    score = float(result)
+                    # Normalize if it's 0-1 scale
+                    if score <= 1.0:
+                        score = score * 100
                     scores.append(min(100, max(0, score)))
-                except:
+                elif isinstance(result, str):
+                    score = float(result)
+                    if score <= 1.0:
+                        score = score * 100
+                    scores.append(min(100, max(0, score)))
+                else:
                     scores.append(50)
+            except:
+                scores.append(50)
         
         return np.mean(scores) if scores else 0.0
         

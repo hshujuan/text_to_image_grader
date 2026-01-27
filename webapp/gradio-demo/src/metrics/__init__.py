@@ -63,6 +63,8 @@ from .alignment import (
     calculate_dsg_score,
     calculate_psg_score,
     calculate_vpeval_score,
+    calculate_all_vlm_metrics_parallel,
+    clear_vlm_cache,
 )
 
 # Safety Metrics
@@ -93,6 +95,8 @@ __all__ = [
     'calculate_dsg_score',
     'calculate_psg_score',
     'calculate_vpeval_score',
+    'calculate_all_vlm_metrics_parallel',
+    'clear_vlm_cache',
     
     # Safety
     'evaluate_t2i_safety',
