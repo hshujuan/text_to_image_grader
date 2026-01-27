@@ -192,15 +192,22 @@ def calculate_clip_iqa_score(image):
     CLIP-IQA uses CLIP embeddings to assess perceptual image quality.
     Returns a score where higher indicates better quality.
     
+    Set SKIP_CLIP_IQA=true in .env to skip pyiqa model download (~244MB).
+    
     Args:
         image: PIL Image to evaluate
     
     Returns:
         float: Quality score 0-100 (higher is better)
     """
+    import os
     global _clipiqa_model
     
-    if PYIQA_AVAILABLE:
+    # Check if CLIP-IQA is disabled via environment variable (saves ~244MB model download)
+    if os.environ.get("SKIP_CLIP_IQA", "").lower() in ("1", "true", "yes"):
+        # Use fallback implementation directly
+        pass
+    elif PYIQA_AVAILABLE:
         try:
             # Lazy load the model
             if _clipiqa_model is None:
