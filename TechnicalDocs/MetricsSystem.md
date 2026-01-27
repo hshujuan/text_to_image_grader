@@ -378,4 +378,4 @@ scikit-image                 # Image conversion utilities
 
 - [METRICS_GUIDE.md](METRICS_GUIDE.md) - User-facing score interpretation guide
 - [GRADER_ARCHITECTURE.md](GRADER_ARCHITECTURE.md) - System architecture and design philosophy
-- [Human Evaluation Guidelines](../../webapp/gradio-demo/Human%20Evaluation%20Guidelines%20for%20Text-to-Image%20(T2I)%20Quality.md) - Manual evaluation criteria
+- [Human Evaluation Guidelines](../webapp/gradio-demo/Human%20Evaluation%20Guidelines%20for%20Text-to-Image%20(T2I)%20Quality.md) - Manual evaluation criteria

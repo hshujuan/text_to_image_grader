@@ -10,7 +10,7 @@ This project provides a comprehensive Gradio application for generating and eval
 ⚡ **Performance Tracking**: Time-to-first-token and detailed timing metrics  
 🔬 **Real Metrics**: Actual model-based calculations (CLIP, VQA, etc.) not LLM estimates
 
-📖 **[Read the Metrics Guide](TechnicalDocs/gradio-demo/METRICS_GUIDE.md)** to understand what each metric measures and how to interpret your results.
+📖 **[Read the Metrics Guide](TechnicalDocs/METRICS_GUIDE.md)** to understand what each metric measures and how to interpret your results.
 
 ## North Star Metric Architecture
 
