@@ -10,7 +10,7 @@ This project provides a comprehensive Gradio application for generating and eval
 ⚡ **Performance Tracking**: Time-to-first-token and detailed timing metrics  
 🔬 **Real Metrics**: Actual model-based calculations (CLIP, VQA, etc.) not LLM estimates
 
-📖 **[Read the Metrics Guide](webapp/gradio-demo/docs/METRICS_GUIDE.md)** to understand what each metric measures and how to interpret your results.
+📖 **[Read the Metrics Guide](TechnicalDocs/gradio-demo/METRICS_GUIDE.md)** to understand what each metric measures and how to interpret your results.
 
 ## North Star Metric Architecture
 
@@ -60,10 +60,8 @@ gradio-demo
 │       ├── image_quality.py # BRISQUE, NIQE, CLIP-IQA
 │       ├── alignment.py   # CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
 │       └── safety.py      # T2ISafety evaluation
-├── docs/                  # Documentation
-│   ├── METRICS_GUIDE.md   # Comprehensive metrics documentation
-│   ├── GRADER_ARCHITECTURE.md  # System architecture details
-│   └── DEMO_EXAMPLES_RATIONALE.md  # Rationale for demo examples
+├── docs/                  # Additional documentation
+│   └── Human Evaluation Guidelines for Text-to-Image (T2I) Quality.md
 ├── test_data/             # Test datasets
 │   ├── T2I_tests.csv      # Full test prompts for batch evaluation
 │   └── T2I_tests_small.csv # Smaller test set for quick testing

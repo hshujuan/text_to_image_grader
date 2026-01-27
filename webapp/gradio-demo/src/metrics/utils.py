@@ -12,12 +12,25 @@ _vqa_model = None
 _vqa_processor = None
 
 
-def pil_to_base64(image):
-    """Convert PIL Image to base64 data URL for VLM APIs"""
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    return f"data:image/png;base64,{base64.b64encode(buffered.getvalue()).decode('utf-8')}"
+def pil_to_base64(image, max_size=1024):
+    """
+    Convert PIL Image to base64 data URL for VLM APIs.
+    - Normalizes color mode
+    - Optionally resizes for stability and cost control
+    """
+    # Normalize color mode
+    if image.mode != "RGB":
+        image = image.convert("RGB")
 
+    # Optional resize (preserve aspect ratio)
+    if max(image.size) > max_size:
+        image.thumbnail((max_size, max_size))
+
+    buffered = BytesIO()
+    image.save(buffered, format="PNG", optimize=True)
+
+    b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{b64}"
 
 def get_clip_model():
     """
