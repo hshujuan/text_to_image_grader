@@ -450,9 +450,9 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm") -> Tuple[fl
     Soft-TIFA evaluation following GenEval2 methodology.
     
     VQA pair sources (in order of priority):
-    1. GenEval2 benchmark pre-defined pairs (800 prompts)
-    2. Rule-based extraction (following GenEval2 patterns)
-    3. LLM-generated pairs (fallback for complex prompts)
+    1. GenEval2 benchmark pre-defined pairs (800 prompts) - exact match, free
+    2. LLM-generated pairs (accurate for complex prompts) - uses NLP parsing
+    3. Rule-based extraction (fallback if LLM fails) - fast, free, limited
     
     Args:
         image: PIL Image to evaluate
@@ -470,22 +470,25 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm") -> Tuple[fl
     vqa_list = None
     vqa_source = None
     
-    # Priority 1: Try GenEval2 benchmark pre-defined pairs
+    # Priority 1: Try GenEval2 benchmark pre-defined pairs (exact match)
     vqa_list = _get_predefined_vqa_list(prompt)
     if vqa_list:
         vqa_source = "GenEval2 benchmark"
     
-    # Priority 2: Try rule-based extraction
+    # Priority 2: Try LLM-generated pairs (more accurate for complex prompts)
+    if not vqa_list:
+        try:
+            vqa_list = _extract_vqa_list_llm(prompt, client, model)
+            if vqa_list:
+                vqa_source = "LLM-generated"
+        except Exception as e:
+            print(f"LLM VQA extraction failed: {e}, falling back to rule-based")
+    
+    # Priority 3: Fall back to rule-based extraction (if LLM fails/unavailable)
     if not vqa_list:
         vqa_list, _ = _extract_vqa_list_rulebased(prompt)
         if vqa_list:
-            vqa_source = "rule-based"
-    
-    # Priority 3: Fall back to LLM-generated pairs
-    if not vqa_list:
-        vqa_list = _extract_vqa_list_llm(prompt, client, model)
-        if vqa_list:
-            vqa_source = "LLM-generated"
+            vqa_source = "rule-based (fallback)"
     
     if not vqa_list:
         print("Warning: No VQA pairs could be generated for prompt")
