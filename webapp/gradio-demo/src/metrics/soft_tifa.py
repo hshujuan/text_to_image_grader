@@ -26,10 +26,144 @@ This implementation:
 import json
 import re
 import os
+import math
+import warnings
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Literal
 from scipy.stats import gmean
 from .utils import pil_to_base64
+
+
+# ============================================================================
+# Qwen Local Model (lazy-loaded, matches GenEval2 exactly)
+# ============================================================================
+
+class _QwenModelManager:
+    """
+    Lazy-loading manager for Qwen3-VL-8B local model.
+    The model is only loaded into memory when first needed.
+    Supports both GPU and CPU (CPU will be very slow).
+    """
+    
+    _instance = None
+    _model = None
+    _processor = None
+    _device = None
+    
+    @classmethod
+    def get(cls):
+        """Get or create the singleton model manager."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+    
+    @classmethod
+    def is_loaded(cls) -> bool:
+        return cls._model is not None
+    
+    def load(self):
+        """Load Qwen3-VL-8B model. Called lazily on first use."""
+        if self._model is not None:
+            return
+        
+        try:
+            import torch
+            from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+        except ImportError:
+            raise ImportError(
+                "Qwen local model requires 'torch' and 'transformers'. "
+                "Install with: pip install torch transformers"
+            )
+        
+        has_gpu = torch.cuda.is_available()
+        if not has_gpu:
+            warnings.warn(
+                "No GPU detected. Qwen3-VL-8B will run on CPU and be VERY slow "
+                "(~60-120 seconds per question). Consider using backend='openai' instead."
+            )
+        
+        model_name = "Qwen/Qwen3-VL-8B-Instruct"
+        print(f"Loading {model_name} ({'GPU' if has_gpu else 'CPU'})...")
+        
+        self._processor = AutoProcessor.from_pretrained(
+            model_name, torch_dtype='auto', device_map='auto'
+        )
+        self._model = Qwen3VLForConditionalGeneration.from_pretrained(
+            model_name, dtype='auto', device_map='auto'
+        )
+        self._device = next(self._model.parameters()).device
+        print(f"Qwen model loaded on {self._device}")
+    
+    @property
+    def model(self):
+        self.load()
+        return self._model
+    
+    @property
+    def processor(self):
+        self.load()
+        return self._processor
+
+
+def _vqa_score_single_qwen(question: str, answer: str, image, answer_variants: list) -> float:
+    """
+    Score a single VQA question using local Qwen model.
+    Matches GenEval2 evaluation.py logic exactly:
+    - Generates 1 token
+    - Reads full softmax distribution
+    - Sums probabilities of all answer variant tokens
+    
+    Args:
+        question: VQA question text
+        answer: Expected answer
+        image: PIL Image or file path
+        answer_variants: List of acceptable answer token strings
+    
+    Returns:
+        Soft score between 0.0 and 1.0
+    """
+    import torch
+    
+    mgr = _QwenModelManager.get()
+    model = mgr.model
+    processor = mgr.processor
+    
+    vqa_prompt = f"{question} Answer in one word."
+    
+    # Construct message in Qwen chat format (same as GenEval2)
+    messages = [
+        {"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": vqa_prompt},
+        ]}
+    ]
+    
+    inputs = processor.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True,
+        return_dict=True, return_tensors="pt"
+    )
+    inputs = inputs.to(model.device)
+    
+    # Generate exactly 1 token with full logits (matching GenEval2)
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=1,
+        do_sample=False,
+        output_scores=True,
+        return_dict_in_generate=True
+    )
+    
+    # Get softmax over entire vocabulary
+    scores = outputs.scores[0]
+    probs = torch.nn.functional.softmax(scores, dim=-1)
+    
+    # Sum probabilities of all answer variant tokens (exact GenEval2 logic)
+    lm_prob = 0.0
+    for av in answer_variants:
+        token_id = processor.tokenizer.encode(av)[0]
+        lm_prob += probs[0, token_id].item()
+    
+    return min(1.0, lm_prob)
 
 
 # ============================================================================
@@ -355,9 +489,23 @@ Important:
     return []
 
 
+def _build_answer_variants(question: str, answer: str) -> list:
+    """
+    Build the list of acceptable answer token variants (shared by both backends).
+    Follows GenEval2 methodology exactly.
+    """
+    if question.lower().startswith("how many"):
+        return [
+            answer, answer.capitalize(), ' ' + answer, ' ' + answer.capitalize(),
+            _return_numeric_string(answer), ' ' + _return_numeric_string(answer)
+        ]
+    else:
+        return ['Yes', 'yes', ' yes', ' Yes']
+
+
 def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -> float:
     """
-    Query VQA model and get soft score for a single question.
+    Query VQA model via OpenAI API and get soft score for a single question.
     
     Following GenEval2 methodology:
     - For counting questions: Check if the answer word or its numeric equivalent is present
@@ -365,16 +513,7 @@ def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -
     
     Returns a soft score between 0.0 and 1.0 based on model confidence.
     """
-    # Construct answer list based on question type (following GenEval2)
-    if question.lower().startswith("how many"):
-        # For counting questions, accept both word and numeric forms
-        answer_variants = [
-            answer, answer.capitalize(), ' ' + answer, ' ' + answer.capitalize(),
-            _return_numeric_string(answer), ' ' + _return_numeric_string(answer)
-        ]
-    else:
-        # For Yes/No questions
-        answer_variants = ['Yes', 'yes', ' yes', ' Yes']
+    answer_variants = _build_answer_variants(question, answer)
     
     vqa_prompt = f"""{question} Answer in one word."""
     
@@ -388,7 +527,7 @@ def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -
             temperature=0.0,
             max_tokens=10,
             logprobs=True,  # Request log probabilities if supported
-            top_logprobs=5
+            top_logprobs=10
         )
         
         response_text = resp.choices[0].message.content.strip()
@@ -397,14 +536,18 @@ def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -
         if hasattr(resp.choices[0], 'logprobs') and resp.choices[0].logprobs:
             logprobs = resp.choices[0].logprobs
             if hasattr(logprobs, 'content') and logprobs.content:
-                # Sum probabilities for all answer variants
-                import math
+                # Sum probabilities for all answer variants (matching GenEval2 behavior)
                 total_prob = 0.0
+                seen_tokens = set()  # Avoid double-counting
                 for token_info in logprobs.content:
                     if hasattr(token_info, 'top_logprobs'):
                         for top_lp in token_info.top_logprobs:
-                            if any(av.lower() in top_lp.token.lower() for av in answer_variants):
-                                total_prob = max(total_prob, math.exp(top_lp.logprob))
+                            token_text = top_lp.token
+                            if token_text not in seen_tokens and \
+                               any(token_text == av or token_text.strip().lower() == av.strip().lower() 
+                                   for av in answer_variants):
+                                total_prob += math.exp(top_lp.logprob)
+                                seen_tokens.add(token_text)
                 if total_prob > 0:
                     return min(1.0, total_prob)
         
@@ -445,7 +588,8 @@ def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -
         return 0.0
 
 
-def soft_tifa(image, prompt: str, client, model, method: str = "gm") -> Tuple[float, List[str], List[float]]:
+def soft_tifa(image, prompt: str, client, model, method: str = "gm",
+              backend: str = "openai") -> Tuple[float, List[str], List[float]]:
     """
     Soft-TIFA evaluation following GenEval2 methodology.
     
@@ -457,9 +601,10 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm") -> Tuple[fl
     Args:
         image: PIL Image to evaluate
         prompt: Text prompt used to generate the image
-        client: API client for VQA model
-        model: Model deployment name
+        client: API client for VQA model (used for OpenAI backend and LLM VQA generation)
+        model: Model deployment name (used for OpenAI backend and LLM VQA generation)
         method: "gm" for geometric mean (prompt-level), "am" for arithmetic mean (atom-level)
+        backend: "openai" for API-based scoring, "qwen" for local Qwen model (matches GenEval2 exactly)
     
     Returns:
         Tuple of (score, questions, per_question_scores)
@@ -496,17 +641,24 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm") -> Tuple[fl
     
     print(f"Using {len(vqa_list)} VQA pairs from {vqa_source}")
     
-    # Convert image to base64
-    img_b64 = pil_to_base64(image)
-    
     # Score each VQA pair
     score_list = []
     questions = []
     
-    for question, answer in vqa_list:
-        questions.append(f"{question} → {answer}")
-        ans_prob = _vqa_score_single(question, answer, img_b64, client, model)
-        score_list.append(ans_prob)
+    if backend == "qwen":
+        # Local Qwen model — matches GenEval2 exactly (full vocab probabilities)
+        for question, answer in vqa_list:
+            questions.append(f"{question} → {answer}")
+            answer_variants = _build_answer_variants(question, answer)
+            ans_prob = _vqa_score_single_qwen(question, answer, image, answer_variants)
+            score_list.append(ans_prob)
+    else:
+        # OpenAI API — approximate via top_logprobs
+        img_b64 = pil_to_base64(image)
+        for question, answer in vqa_list:
+            questions.append(f"{question} → {answer}")
+            ans_prob = _vqa_score_single(question, answer, img_b64, client, model)
+            score_list.append(ans_prob)
     
     if not score_list:
         return 0.0, questions, []
@@ -525,30 +677,38 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm") -> Tuple[fl
     return float(final_score * 100), questions, score_list
 
 
-def calculate_soft_tifa_gm(image, prompt: str, client, model) -> Tuple[float, List[str], List[float]]:
+def calculate_soft_tifa_gm(image, prompt: str, client=None, model=None,
+                           backend: str = "openai") -> Tuple[float, List[str], List[float]]:
     """
     Soft-TIFA with Geometric Mean aggregation.
     
     Best for prompt-level evaluation where all atoms should be present.
     A single failed atom significantly reduces the score.
     
+    Args:
+        backend: "openai" or "qwen" (local model, matches GenEval2 exactly)
+    
     Returns:
         Tuple of (score, questions, per_question_scores)
     """
-    return soft_tifa(image, prompt, client, model, method="gm")
+    return soft_tifa(image, prompt, client, model, method="gm", backend=backend)
 
 
-def calculate_soft_tifa_am(image, prompt: str, client, model) -> Tuple[float, List[str], List[float]]:
+def calculate_soft_tifa_am(image, prompt: str, client=None, model=None,
+                           backend: str = "openai") -> Tuple[float, List[str], List[float]]:
     """
     Soft-TIFA with Arithmetic Mean aggregation.
     
     Best for atom-level evaluation.
     Treats each atom equally regardless of other atoms.
     
+    Args:
+        backend: "openai" or "qwen" (local model, matches GenEval2 exactly)
+    
     Returns:
         Tuple of (score, questions, per_question_scores)
     """
-    return soft_tifa(image, prompt, client, model, method="am")
+    return soft_tifa(image, prompt, client, model, method="am", backend=backend)
 
 
 # Default export: GM for prompt-level evaluation (following GenEval2 paper recommendation)
