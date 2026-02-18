@@ -706,16 +706,17 @@ def calculate_dsg_score(image, prompt, client, model):
         
         # =====================================================================
         # Step 4: VQA — ask each question about the image (binary yes/no)
+        # OPTIMIZED: Parallel VQA calls (was sequential, ~15s each × N questions)
         # =====================================================================
         img_base64 = pil_to_base64(image)
         
+        sorted_qids = sorted(id2question.keys())
         qid2answer = {}
-        for qid in sorted(id2question.keys()):
+
+        def _ask_one(qid):
             question = id2question[qid]
             if not question or not question.strip():
-                qid2answer[qid] = 'yes'  # Skip empty questions (treat as pass)
-                continue
-            
+                return qid, 'yes'  # Skip empty questions (treat as pass)
             vqa_resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": [
@@ -729,9 +730,17 @@ def calculate_dsg_score(image, prompt, client, model):
                 max_tokens=20,
             )
             answer = vqa_resp.choices[0].message.content.strip().lower()
-            # Clean punctuation
             answer = answer.replace(".", "").replace(",", "").replace("?", "").replace("!", "")
-            qid2answer[qid] = answer
+            return qid, answer
+
+        with ThreadPoolExecutor(max_workers=min(8, len(sorted_qids))) as executor:
+            futures = [executor.submit(_ask_one, qid) for qid in sorted_qids]
+            for fut in as_completed(futures):
+                try:
+                    qid, answer = fut.result()
+                    qid2answer[qid] = answer
+                except Exception as e:
+                    print(f"DSG VQA error: {e}")
         
         # =====================================================================
         # Step 5: Dependency-aware scoring (from lib/DSG/dsg/vqa_utils.py)
@@ -838,14 +847,15 @@ def calculate_dsg_score_detailed(image, prompt, client, model):
         raw_deps = dep_resp.choices[0].message.content.strip().split("input:")[0].strip()
         id2dependency = _parse_dependency_output(raw_deps)
 
-        # Stage 4: VQA
+        # Stage 4: VQA (OPTIMIZED: parallel calls)
         img_base64 = pil_to_base64(image)
+        sorted_qids = sorted(id2question.keys())
         qid2answer = {}
-        for qid in sorted(id2question.keys()):
+
+        def _ask_one_detailed(qid):
             question = id2question[qid]
             if not question or not question.strip():
-                qid2answer[qid] = 'yes'
-                continue
+                return qid, 'yes'
             vqa_resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": [
@@ -859,7 +869,16 @@ def calculate_dsg_score_detailed(image, prompt, client, model):
             )
             answer = vqa_resp.choices[0].message.content.strip().lower()
             answer = answer.replace(".", "").replace(",", "").replace("?", "").replace("!", "")
-            qid2answer[qid] = answer
+            return qid, answer
+
+        with ThreadPoolExecutor(max_workers=min(8, len(sorted_qids))) as executor:
+            futures = [executor.submit(_ask_one_detailed, qid) for qid in sorted_qids]
+            for fut in as_completed(futures):
+                try:
+                    qid, answer = fut.result()
+                    qid2answer[qid] = answer
+                except Exception as e:
+                    print(f"DSG detailed VQA error: {e}")
 
         # Stage 5: Dependency-aware scoring
         result = _calc_vqa_score_with_dependency(qid2answer, id2dependency)

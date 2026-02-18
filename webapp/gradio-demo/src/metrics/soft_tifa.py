@@ -654,11 +654,27 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm",
             score_list.append(ans_prob)
     else:
         # OpenAI API — approximate via top_logprobs
+        # OPTIMIZED: Parallelize VQA calls (was sequential, ~15s each × N atoms)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         img_b64 = pil_to_base64(image)
-        for question, answer in vqa_list:
-            questions.append(f"{question} → {answer}")
-            ans_prob = _vqa_score_single(question, answer, img_b64, client, model)
-            score_list.append(ans_prob)
+        questions = [f"{q} → {a}" for q, a in vqa_list]
+
+        def _score_one(idx_qa):
+            idx, (question, answer) = idx_qa
+            return idx, _vqa_score_single(question, answer, img_b64, client, model)
+
+        score_list = [0.0] * len(vqa_list)
+        with ThreadPoolExecutor(max_workers=min(8, len(vqa_list))) as executor:
+            futures = [
+                executor.submit(_score_one, (i, qa))
+                for i, qa in enumerate(vqa_list)
+            ]
+            for fut in as_completed(futures):
+                try:
+                    idx, prob = fut.result()
+                    score_list[idx] = prob
+                except Exception as e:
+                    print(f"VQA scoring error: {e}")
     
     if not score_list:
         return 0.0, questions, []
