@@ -580,8 +580,15 @@ def calculate_dsg_score(image, prompt, client, model):
     """
     Calculate DSG (Davidsonian Scene Graph) score.
     
-    DSG decomposes the prompt into semantic primitives (entities, attributes,
-    relations) and verifies each primitive against the image.
+    Faithful reimplementation of the original DSG pipeline from lib/DSG:
+    1. Tuple generation: Extract skill-specific semantic tuples from the prompt
+    2. Question generation: Convert each tuple into a yes/no VQA question
+    3. Dependency generation: Identify parent-child relationships between tuples
+    4. VQA: Ask each question about the image → binary yes/no
+    5. Dependency filtering: Zero out child scores where parent answered "no"
+    6. Final score = average of filtered scores
+    
+    Uses in-context learning with 23 TIFA-160 examples (same as original DSG paper).
     
     Args:
         image: PIL Image to evaluate
@@ -593,73 +600,344 @@ def calculate_dsg_score(image, prompt, client, model):
         float: DSG score 0-100
     """
     try:
-        # Extract Davidsonian semantic primitives
-        dsg_prompt = f"""
-Decompose this prompt into Davidsonian Scene Graph primitives:
-Prompt: "{prompt}"
-
-Extract:
-- Entities (objects/subjects)
-- Attributes (properties of entities)
-- Relations (between entities)
-
-Return ONLY valid JSON:
-{{"primitives": [
-    {{"type": "entity", "content": "description"}},
-    {{"type": "attribute", "content": "entity has attribute"}},
-    {{"type": "relation", "content": "entity1 relation entity2"}}
-]}}
-"""
+        # =====================================================================
+        # Load in-context examples from TIFA-160 (same 23 examples as original)
+        # =====================================================================
+        icl_examples = _load_dsg_icl_examples()
         
-        dsg_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Extract Davidsonian semantic primitives."},
-                {"role": "user", "content": dsg_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=500
+        # =====================================================================
+        # Step 1: Tuple generation (prompt → semantic tuples)
+        # =====================================================================
+        tuple_preamble = (
+            "Task: given input prompts, describe each scene with skill-specific tuples.\n"
+            "Do not generate same tuples again. Do not generate tuples that are not "
+            "explicitly described in the prompts.\n"
+            "output format: id | tuple"
         )
         
-        if not dsg_response.choices:
+        tuple_icl = ""
+        for ex in icl_examples:
+            tuple_icl += f"\ninput: {ex['prompt']}\noutput: {ex['tuple_output']}\n"
+        
+        tuple_prompt = f"{tuple_preamble}\n{tuple_icl}\ninput: {prompt}\noutput: "
+        
+        tuple_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": tuple_prompt}],
+            temperature=0.0,
+            max_tokens=500,
+        )
+        raw_tuples = tuple_resp.choices[0].message.content.strip()
+        # Parse: stop at next "input:" if the model continues
+        raw_tuples = raw_tuples.split("input:")[0].strip()
+        
+        id2tuple = _parse_tuple_output(raw_tuples)
+        if not id2tuple:
+            print("DSG: No tuples generated")
             return 0.0
         
-        dsg_content = dsg_response.choices[0].message.content.strip()
-        dsg_content = dsg_content.replace('```json', '').replace('```', '').strip()
-        primitives = json.loads(dsg_content)['primitives']
+        # Reconstruct tuple string for subsequent steps
+        tuple_str = "\n".join(f"{tid} | {tval}" for tid, tval in sorted(id2tuple.items()))
         
-        # OPTIMIZED: Batch verify all primitives in a single API call
+        # =====================================================================
+        # Step 2: Question generation (prompt + tuples → yes/no questions)
+        # =====================================================================
+        question_preamble = (
+            "Task: given input prompts and skill-specific tuples, re-write tuple "
+            "each in natural language question.\n"
+            "output format: id | question"
+        )
+        
+        question_icl = ""
+        for ex in icl_examples:
+            q_input = ex['prompt'] + "\n" + ex['tuple_output']
+            question_icl += f"\ninput: {q_input}\noutput: {ex['question_output']}\n"
+        
+        question_input = prompt + "\n" + tuple_str
+        question_prompt = f"{question_preamble}\n{question_icl}\ninput: {question_input}\noutput: "
+        
+        question_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": question_prompt}],
+            temperature=0.0,
+            max_tokens=500,
+        )
+        raw_questions = question_resp.choices[0].message.content.strip()
+        raw_questions = raw_questions.split("input:")[0].strip()
+        
+        id2question = _parse_question_output(raw_questions)
+        if not id2question:
+            print("DSG: No questions generated")
+            return 0.0
+        
+        # =====================================================================
+        # Step 3: Dependency generation (prompt + tuples → parent dependencies)
+        # =====================================================================
+        dep_preamble = (
+            "Task: given input prompts and tuples, describe the parent tuples of each tuple.\n"
+            "output format: id | dependencies (comma separated)"
+        )
+        
+        dep_icl = ""
+        for ex in icl_examples:
+            dep_input = ex['prompt'] + "\n" + ex['tuple_output']
+            dep_icl += f"\ninput: {dep_input}\noutput: {ex['dep_output']}\n"
+        
+        dep_input = prompt + "\n" + tuple_str
+        dep_prompt = f"{dep_preamble}\n{dep_icl}\ninput: {dep_input}\noutput: "
+        
+        dep_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": dep_prompt}],
+            temperature=0.0,
+            max_tokens=500,
+        )
+        raw_deps = dep_resp.choices[0].message.content.strip()
+        raw_deps = raw_deps.split("input:")[0].strip()
+        
+        id2dependency = _parse_dependency_output(raw_deps)
+        
+        # =====================================================================
+        # Step 4: VQA — ask each question about the image (binary yes/no)
+        # =====================================================================
         img_base64 = pil_to_base64(image)
         
-        # Build batch verification items
-        verification_items = []
-        for prim in primitives:
-            verification_items.append({
-                'prompt': f"Is this {prim['type']} present: \"{prim['content']}\"? Rate confidence",
-                'response_type': 'score'
-            })
+        qid2answer = {}
+        for qid in sorted(id2question.keys()):
+            question = id2question[qid]
+            if not question or not question.strip():
+                qid2answer[qid] = 'yes'  # Skip empty questions (treat as pass)
+                continue
+            
+            vqa_resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": img_base64}},
+                    {"type": "text", "text": (
+                        f"Answer only with 'yes' or 'no'. Do not give other outputs "
+                        f"or punctuation marks. Question: {question}"
+                    )}
+                ]}],
+                temperature=0.0,
+                max_tokens=20,
+            )
+            answer = vqa_resp.choices[0].message.content.strip().lower()
+            # Clean punctuation
+            answer = answer.replace(".", "").replace(",", "").replace("?", "").replace("!", "")
+            qid2answer[qid] = answer
         
-        # Single batched API call instead of N separate calls
-        batch_results = _batch_verify_with_image(client, model, img_base64, verification_items)
+        # =====================================================================
+        # Step 5: Dependency-aware scoring (from lib/DSG/dsg/vqa_utils.py)
+        # =====================================================================
+        result = _calc_vqa_score_with_dependency(qid2answer, id2dependency)
         
-        # Parse scores
-        scores = []
-        for result in batch_results:
-            try:
-                if isinstance(result, (int, float)):
-                    scores.append(min(1.0, max(0.0, float(result))))
-                elif isinstance(result, str):
-                    scores.append(min(1.0, max(0.0, float(result))))
-                else:
-                    scores.append(0.5)
-            except:
-                scores.append(0.5)
-        
-        return np.mean(scores) * 100 if scores else 0.0
+        return result['average_score_with_dependency'] * 100
         
     except Exception as e:
         print(f"DSG calculation error: {e}")
+        import traceback
+        traceback.print_exc()
         return 0.0
+
+
+# =============================================================================
+# DSG Helper Functions (ported from lib/DSG)
+# =============================================================================
+
+_DSG_ICL_EXAMPLES = None
+
+def _load_dsg_icl_examples():
+    """
+    Load the 23 TIFA-160 in-context examples used by DSG.
+    Caches after first load.
+    """
+    global _DSG_ICL_EXAMPLES
+    if _DSG_ICL_EXAMPLES is not None:
+        return _DSG_ICL_EXAMPLES
+    
+    import pandas as pd
+    from pathlib import Path
+    
+    TIFA160_ICL_TRAIN_IDS = [
+        'coco_361740', 'drawbench_155', 'partiprompt_86', 'paintskill_374',
+        'coco_552592', 'partiprompt_1414', 'coco_627537', 'coco_744388',
+        'partiprompt_1108', 'coco_397109', 'coco_666114', 'coco_62896',
+        'paintskill_235', 'drawbench_159', 'partiprompt_893', 'coco_322041',
+        'coco_292534', 'drawbench_57', 'partiprompt_555', 'coco_488166',
+        'partiprompt_726', 'coco_323167', 'coco_625027',
+    ]
+    
+    # Find tifa160-dev-anns.csv
+    possible_paths = [
+        Path(__file__).parent.parent.parent.parent.parent / "lib" / "DSG" / "dsg" / "data" / "tifa160-dev-anns.csv",
+        Path(__file__).parent.parent.parent.parent.parent.parent / "lib" / "DSG" / "dsg" / "data" / "tifa160-dev-anns.csv",
+        Path("lib/DSG/dsg/data/tifa160-dev-anns.csv"),
+    ]
+    
+    data_path = None
+    for p in possible_paths:
+        if p.exists():
+            data_path = p
+            break
+    
+    if data_path is None:
+        print("Warning: TIFA-160 data not found. DSG will use zero-shot (less accurate).")
+        _DSG_ICL_EXAMPLES = []
+        return _DSG_ICL_EXAMPLES
+    
+    df = pd.read_csv(data_path)
+    
+    examples = []
+    for item_id in TIFA160_ICL_TRAIN_IDS:
+        rows = df[df.item_id == item_id]
+        if rows.empty:
+            continue
+        
+        prompt = rows.text.iloc[0]
+        tuples = rows.tuple.tolist()
+        deps = [str(d) for d in rows.dependency.tolist()]
+        questions = [str(q) for q in rows.question_natural_language.tolist()]
+        
+        tuple_output = "\n".join(f"{i+1} | {t}" for i, t in enumerate(tuples))
+        dep_output = "\n".join(f"{i+1} | {d}" for i, d in enumerate(deps))
+        question_output = "\n".join(f"{i+1} | {q}" for i, q in enumerate(questions))
+        
+        examples.append({
+            'prompt': prompt,
+            'tuple_output': tuple_output,
+            'dep_output': dep_output,
+            'question_output': question_output,
+        })
+    
+    print(f"Loaded {len(examples)} DSG in-context examples from TIFA-160")
+    _DSG_ICL_EXAMPLES = examples
+    return _DSG_ICL_EXAMPLES
+
+
+def _parse_tuple_output(output_str):
+    """Parse tuple generation output into {id: tuple_str} dict. (from lib/DSG parse_utils.py)"""
+    id2tup = {}
+    for line in output_str.strip().split('\n'):
+        line = line.strip()
+        if not line or '|' not in line:
+            continue
+        try:
+            parts = line.split('|', 1)
+            tup_id = int(parts[0].strip())
+            tup = parts[1].strip()
+            # Clean: only take string before parenthesis content (category name)
+            tup_clean = tup.strip().split('(')[0].strip() if '(' in tup else tup
+            id2tup[tup_id] = tup  # Keep full tuple for question/dep generation
+        except (ValueError, IndexError):
+            continue
+    return id2tup
+
+
+def _parse_question_output(output_str):
+    """Parse question generation output into {id: question} dict. (from lib/DSG parse_utils.py)"""
+    id2question = {}
+    for line in output_str.strip().split('\n'):
+        line = line.strip()
+        if not line or '|' not in line:
+            continue
+        try:
+            parts = line.split('|', 1)
+            qid = int(parts[0].strip())
+            question = parts[1].strip()
+            id2question[qid] = question
+        except (ValueError, IndexError):
+            continue
+    return id2question
+
+
+def _parse_dependency_output(output_str):
+    """Parse dependency generation output into {id: [parent_ids]} dict. (from lib/DSG parse_utils.py)"""
+    id2dep = {}
+    for line in output_str.strip().split('\n'):
+        line = line.strip()
+        if not line or '|' not in line:
+            continue
+        try:
+            parts = line.split('|', 1)
+            qid = int(parts[0].strip())
+            dep_str = parts[1].strip()
+            
+            # Clean dependency IDs (filter out non-numeric except '0' and '-')
+            dep_parts = [d.strip() for d in dep_str.split(',')]
+            dep_parts = [d for d in dep_parts if d.isnumeric() or d == '-']
+            
+            # If includes 0 and others, remove 0
+            if len(dep_parts) > 1:
+                dep_parts = [d for d in dep_parts if d != '0']
+            
+            dep_ids = [int(d) for d in dep_parts if d.isnumeric()]
+            if not dep_ids:
+                dep_ids = [0]
+            
+            id2dep[qid] = dep_ids
+        except (ValueError, IndexError):
+            continue
+    return id2dep
+
+
+def _calc_vqa_score_with_dependency(qid2answer, qid2dependency=None):
+    """
+    Calculate VQA scores with dependency filtering.
+    Exact logic from lib/DSG/dsg/vqa_utils.py calc_vqa_score().
+    
+    - Binary scoring: answer == ground_truth ('yes') → 1.0, else 0.0
+    - Dependency filtering: if any parent question scored 0, child is zeroed out
+    """
+    from copy import deepcopy
+    
+    # Ground truth: all answers should be 'yes'
+    qid2gtanswer = {qid: 'yes' for qid in qid2answer.keys()}
+    
+    # Binary scores
+    qid2scores = {}
+    for qid, answer in qid2answer.items():
+        gt = qid2gtanswer[qid]
+        qid2scores[qid] = float(answer == gt)
+    
+    try:
+        average_score_without_dep = sum(qid2scores.values()) / len(qid2scores)
+    except ZeroDivisionError:
+        average_score_without_dep = 0.0
+    
+    # Dependency filtering
+    qid2validity = {}
+    qid2scores_filtered = deepcopy(qid2scores)
+    
+    if qid2dependency is None:
+        qid2dependency = {qid: [0] for qid in qid2answer.keys()}
+    
+    for qid, parent_ids in qid2dependency.items():
+        any_parent_no = False
+        for pid in parent_ids:
+            if pid == 0:
+                continue
+            if pid in qid2scores and qid2scores[pid] == 0:
+                any_parent_no = True
+                break
+        if any_parent_no:
+            qid2scores_filtered[qid] = 0.0
+            qid2validity[qid] = False
+        else:
+            qid2validity[qid] = True
+    
+    try:
+        average_score_with_dep = sum(qid2scores_filtered.values()) / len(qid2scores)
+    except ZeroDivisionError:
+        average_score_with_dep = 0.0
+    
+    return {
+        'qid2dependency': qid2dependency,
+        'qid2answer': qid2answer,
+        'qid2scores': qid2scores,
+        'qid2validity': qid2validity,
+        'average_score_with_dependency': average_score_with_dep,
+        'average_score_without_dependency': average_score_without_dep,
+    }
 
 
 def calculate_psg_score(image, prompt, client, model):
