@@ -740,6 +740,144 @@ def calculate_dsg_score(image, prompt, client, model):
         return 0.0
 
 
+def calculate_dsg_score_detailed(image, prompt, client, model):
+    """
+    Calculate DSG score with full pipeline details for comparison experiments.
+    
+    Returns:
+        dict with keys:
+          - score: float 0-100
+          - tuples: dict {id: tuple_str}
+          - questions: dict {id: question_str}
+          - dependencies: dict {id: [parent_ids]}
+          - answers: dict {id: 'yes'/'no'}
+          - raw_scores: dict {id: 0.0|1.0} before dependency filtering
+          - filtered_scores: dict {id: 0.0|1.0} after dependency filtering
+          - validity: dict {id: bool}
+          - score_without_dep: float 0-100
+          - error: str or None
+    """
+    empty = {
+        'score': 0.0, 'tuples': {}, 'questions': {}, 'dependencies': {},
+        'answers': {}, 'raw_scores': {}, 'filtered_scores': {},
+        'validity': {}, 'score_without_dep': 0.0, 'error': None,
+    }
+    try:
+        icl_examples = _load_dsg_icl_examples()
+
+        # Stage 1: Tuple generation
+        tuple_preamble = (
+            "Task: given input prompts, describe each scene with skill-specific tuples.\n"
+            "Do not generate same tuples again. Do not generate tuples that are not "
+            "explicitly described in the prompts.\n"
+            "output format: id | tuple"
+        )
+        tuple_icl = ""
+        for ex in icl_examples:
+            tuple_icl += f"\ninput: {ex['prompt']}\noutput: {ex['tuple_output']}\n"
+        tuple_prompt = f"{tuple_preamble}\n{tuple_icl}\ninput: {prompt}\noutput: "
+        tuple_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": tuple_prompt}],
+            temperature=0.0, max_tokens=500,
+        )
+        raw_tuples = tuple_resp.choices[0].message.content.strip().split("input:")[0].strip()
+        id2tuple = _parse_tuple_output(raw_tuples)
+        if not id2tuple:
+            empty['error'] = 'No tuples generated'
+            return empty
+        tuple_str = "\n".join(f"{tid} | {tval}" for tid, tval in sorted(id2tuple.items()))
+
+        # Stage 2: Question generation
+        question_preamble = (
+            "Task: given input prompts and skill-specific tuples, re-write tuple "
+            "each in natural language question.\n"
+            "output format: id | question"
+        )
+        question_icl = ""
+        for ex in icl_examples:
+            q_input = ex['prompt'] + "\n" + ex['tuple_output']
+            question_icl += f"\ninput: {q_input}\noutput: {ex['question_output']}\n"
+        question_input = prompt + "\n" + tuple_str
+        question_prompt = f"{question_preamble}\n{question_icl}\ninput: {question_input}\noutput: "
+        question_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": question_prompt}],
+            temperature=0.0, max_tokens=500,
+        )
+        raw_questions = question_resp.choices[0].message.content.strip().split("input:")[0].strip()
+        id2question = _parse_question_output(raw_questions)
+        if not id2question:
+            empty['error'] = 'No questions generated'
+            empty['tuples'] = id2tuple
+            return empty
+
+        # Stage 3: Dependency generation
+        dep_preamble = (
+            "Task: given input prompts and tuples, describe the parent tuples of each tuple.\n"
+            "output format: id | dependencies (comma separated)"
+        )
+        dep_icl = ""
+        for ex in icl_examples:
+            dep_input = ex['prompt'] + "\n" + ex['tuple_output']
+            dep_icl += f"\ninput: {dep_input}\noutput: {ex['dep_output']}\n"
+        dep_input = prompt + "\n" + tuple_str
+        dep_prompt = f"{dep_preamble}\n{dep_icl}\ninput: {dep_input}\noutput: "
+        dep_resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": dep_prompt}],
+            temperature=0.0, max_tokens=500,
+        )
+        raw_deps = dep_resp.choices[0].message.content.strip().split("input:")[0].strip()
+        id2dependency = _parse_dependency_output(raw_deps)
+
+        # Stage 4: VQA
+        img_base64 = pil_to_base64(image)
+        qid2answer = {}
+        for qid in sorted(id2question.keys()):
+            question = id2question[qid]
+            if not question or not question.strip():
+                qid2answer[qid] = 'yes'
+                continue
+            vqa_resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": img_base64}},
+                    {"type": "text", "text": (
+                        f"Answer only with 'yes' or 'no'. Do not give other outputs "
+                        f"or punctuation marks. Question: {question}"
+                    )}
+                ]}],
+                temperature=0.0, max_tokens=20,
+            )
+            answer = vqa_resp.choices[0].message.content.strip().lower()
+            answer = answer.replace(".", "").replace(",", "").replace("?", "").replace("!", "")
+            qid2answer[qid] = answer
+
+        # Stage 5: Dependency-aware scoring
+        result = _calc_vqa_score_with_dependency(qid2answer, id2dependency)
+
+        return {
+            'score': result['average_score_with_dependency'] * 100,
+            'tuples': id2tuple,
+            'questions': id2question,
+            'dependencies': result['qid2dependency'],
+            'answers': result['qid2answer'],
+            'raw_scores': result['qid2scores'],
+            'filtered_scores': {qid: result['qid2scores'].get(qid, 0.0)
+                                if result['qid2validity'].get(qid, True) else 0.0
+                                for qid in result['qid2scores']},
+            'validity': result['qid2validity'],
+            'score_without_dep': result['average_score_without_dependency'] * 100,
+            'error': None,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        empty['error'] = str(e)
+        return empty
+
+
 # =============================================================================
 # DSG Helper Functions (ported from lib/DSG)
 # =============================================================================
@@ -938,6 +1076,113 @@ def _calc_vqa_score_with_dependency(qid2answer, qid2dependency=None):
         'average_score_with_dependency': average_score_with_dep,
         'average_score_without_dependency': average_score_without_dep,
     }
+
+
+def calculate_psg_score_detailed(image, prompt, client, model):
+    """
+    Calculate PSG score with full scene-graph details for comparison experiments.
+    
+    Returns:
+        dict with keys:
+          - score: float 0-100
+          - expected_objects: list
+          - expected_attributes: dict
+          - expected_relations: list
+          - object_score: float 0-100
+          - attribute_score: float 0-100
+          - relation_score: float 0-100
+          - error: str or None
+    """
+    empty = {
+        'score': 0.0, 'expected_objects': [], 'expected_attributes': {},
+        'expected_relations': [], 'object_score': 0.0,
+        'attribute_score': 0.0, 'relation_score': 0.0, 'error': None,
+    }
+    try:
+        img_base64 = pil_to_base64(image)
+
+        sg_prompt = f"""For the prompt: \"{prompt}\"
+
+Create an expected scene graph with:
+1. Objects that should appear
+2. Object attributes
+3. Relationships between objects
+
+Return ONLY valid JSON:
+{{"scene_graph": {{
+    "objects": ["obj1", "obj2"],
+    "attributes": {{"obj1": ["attr1"], "obj2": ["attr2"]}},
+    "relations": ["obj1 relation obj2"]
+}}}}"""
+        sg_response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Create scene graphs from prompts."},
+                {"role": "user", "content": sg_prompt}
+            ],
+            temperature=0.0, max_tokens=500,
+        )
+        if not sg_response.choices:
+            empty['error'] = 'No scene graph response'
+            return empty
+        sg_content = sg_response.choices[0].message.content.strip()
+        sg_content = sg_content.replace('```json', '').replace('```', '').strip()
+        expected_sg = json.loads(sg_content)['scene_graph']
+
+        verify_prompt = f"""Analyze this image and compare to expected scene graph:
+
+Expected objects: {expected_sg.get('objects', [])}
+Expected attributes: {expected_sg.get('attributes', {})}
+Expected relations: {expected_sg.get('relations', [])}
+
+Score each category 0-100:
+- object_score: How many expected objects are present?
+- attribute_score: How well do attributes match?
+- relation_score: How well do relationships match?
+
+Return ONLY valid JSON:
+{{"object_score": X, "attribute_score": X, "relation_score": X}}"""
+        verify_response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Evaluate scene graph alignment."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": verify_prompt},
+                    {"type": "image_url", "image_url": {"url": img_base64}}
+                ]}
+            ],
+            temperature=0.0, max_tokens=100,
+        )
+        if not verify_response.choices:
+            empty['error'] = 'No verification response'
+            empty['expected_objects'] = expected_sg.get('objects', [])
+            empty['expected_attributes'] = expected_sg.get('attributes', {})
+            empty['expected_relations'] = expected_sg.get('relations', [])
+            return empty
+
+        result_content = verify_response.choices[0].message.content.strip()
+        result_content = result_content.replace('```json', '').replace('```', '').strip()
+        scores = json.loads(result_content)
+        obj_s = scores.get('object_score', 0)
+        attr_s = scores.get('attribute_score', 0)
+        rel_s = scores.get('relation_score', 0)
+        avg_score = float(np.mean([obj_s, attr_s, rel_s]))
+
+        return {
+            'score': avg_score,
+            'expected_objects': expected_sg.get('objects', []),
+            'expected_attributes': expected_sg.get('attributes', {}),
+            'expected_relations': expected_sg.get('relations', []),
+            'object_score': obj_s,
+            'attribute_score': attr_s,
+            'relation_score': rel_s,
+            'error': None,
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        empty['error'] = str(e)
+        return empty
 
 
 def calculate_psg_score(image, prompt, client, model):

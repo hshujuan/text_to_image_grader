@@ -44,7 +44,7 @@ from metrics import (
 """
 
 # North Star Metric
-from .soft_tifa import calculate_soft_tifa_score
+from .soft_tifa import calculate_soft_tifa_score, calculate_soft_tifa_gm, calculate_soft_tifa_am
 
 # Image Quality Metrics
 from .image_quality import (
@@ -61,7 +61,9 @@ from .alignment import (
     calculate_pickscore_proxy,
     calculate_tifa_score,
     calculate_dsg_score,
+    calculate_dsg_score_detailed,
     calculate_psg_score,
+    calculate_psg_score_detailed,
     calculate_vpeval_score,
     calculate_all_vlm_metrics_parallel,
     clear_vlm_cache,
@@ -80,6 +82,8 @@ from .utils import (
 __all__ = [
     # North Star
     'calculate_soft_tifa_score',
+    'calculate_soft_tifa_gm',
+    'calculate_soft_tifa_am',
     
     # Image Quality
     'calculate_brisque_score',
@@ -93,7 +97,9 @@ __all__ = [
     'calculate_pickscore_proxy',
     'calculate_tifa_score',
     'calculate_dsg_score',
+    'calculate_dsg_score_detailed',
     'calculate_psg_score',
+    'calculate_psg_score_detailed',
     'calculate_vpeval_score',
     'calculate_all_vlm_metrics_parallel',
     'clear_vlm_cache',
