@@ -120,6 +120,97 @@ def prewarm_models():
     print(f"🔥 Models pre-warmed in {time.time() - start:.1f}s")
 
 
+def _build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_score, dsg_details, psg_score, psg_details):
+    """
+    Build concise interpretation text explaining WHY each North Star score
+    looks the way it does, based on the underlying data.
+    """
+    lines = []
+
+    # --- Soft-TIFA GM ---
+    if atoms and atom_scores:
+        n = len(atoms)
+        verified = sum(1 for s in atom_scores if s >= 0.9)
+        partial = [(s, a) for s, a in zip(atom_scores, atoms) if 0.3 <= s < 0.9]
+        failed = [(s, a) for s, a in zip(atom_scores, atoms) if s < 0.3]
+
+        parts = []
+        if verified:
+            parts.append(f"{verified}/{n} atoms fully verified (≥0.9)")
+        if partial:
+            parts.append(f"{len(partial)} partially matched")
+        if failed:
+            parts.append(f"{len(failed)} failed")
+
+        interp = "; ".join(parts)
+
+        # Show weakest atoms (up to 2)
+        sorted_pairs = sorted(zip(atom_scores, atoms))
+        weakest = [(s, a) for s, a in sorted_pairs if s < 0.9][:2]
+        if weakest:
+            weak_str = ", ".join(f'"{a}" ({s:.2f})' for s, a in weakest)
+            interp += f". Weakest: {weak_str}"
+
+        lines.append(f"> **Soft-TIFA GM ({tifa_gm_score:.1f}):** {interp}")
+
+    # --- DSG ---
+    if dsg_details and not dsg_details.get('error'):
+        questions = dsg_details.get('questions', {})
+        answers = dsg_details.get('answers', {})
+        validity = dsg_details.get('validity', {})
+        n_q = len(questions)
+        yes_count = sum(1 for a in answers.values() if a == 'yes')
+        no_count = n_q - yes_count
+        invalid_count = sum(1 for v in validity.values() if not v)
+        score_no_dep = dsg_details.get('score_without_dep', 0)
+
+        interp = f"{n_q} questions generated → {yes_count} yes, {no_count} no"
+        if invalid_count > 0:
+            interp += (f". Dependency filtering zeroed {invalid_count} additional "
+                       f"question{'s' if invalid_count > 1 else ''} (parent absent)")
+            interp += f" — score w/o deps: {score_no_dep:.0f}, with deps: {dsg_score:.0f}"
+
+        # Show failed questions
+        failed_qs = [questions[qid] for qid in sorted(answers) if answers.get(qid) != 'yes' and qid in questions]
+        if failed_qs:
+            shown = failed_qs[:2]
+            fail_str = "; ".join(f'"{q}"' for q in shown)
+            if len(failed_qs) > 2:
+                fail_str += f" (+{len(failed_qs) - 2} more)"
+            interp += f". Failed: {fail_str}"
+
+        lines.append(f"> **DSG ({dsg_score:.1f}):** {interp}")
+    elif dsg_details and dsg_details.get('error'):
+        lines.append(f"> **DSG ({dsg_score:.1f}):** Evaluation error — {dsg_details['error']}")
+
+    # --- PSG ---
+    if psg_details and not psg_details.get('error'):
+        obj_s = psg_details.get('object_score', 0)
+        attr_s = psg_details.get('attribute_score', 0)
+        rel_s = psg_details.get('relation_score', 0)
+        objects = psg_details.get('expected_objects', [])
+
+        interp = f"Sub-scores — Objects: {obj_s:.0f}/100, Attributes: {attr_s:.0f}/100, Relations: {rel_s:.0f}/100"
+
+        # Identify weakest dimension
+        dims = {'Objects': obj_s, 'Attributes': attr_s, 'Relations': rel_s}
+        weakest_dim = min(dims, key=dims.get)
+        if dims[weakest_dim] < 80:
+            interp += f". Weakest dimension: {weakest_dim} ({dims[weakest_dim]:.0f})"
+
+        if objects:
+            obj_list = ", ".join(objects[:5])
+            if len(objects) > 5:
+                obj_list += f" (+{len(objects) - 5} more)"
+            interp += f". Expected objects: {obj_list}"
+
+        lines.append(f"> **PSG ({psg_score:.1f}):** {interp}")
+    elif psg_details and psg_details.get('error'):
+        lines.append(f"> **PSG ({psg_score:.1f}):** Evaluation error — {psg_details['error']}")
+
+    return "\n" + "\n".join(lines) + "\n" if lines else "\n"
+
+
 def grade_image_quality_with_status(image, prompt, progress=None):
     """
     Generator that yields status updates during grading.
@@ -214,7 +305,9 @@ def grade_image_quality_with_status(image, prompt, progress=None):
     vlm_results = calculate_all_vlm_metrics_parallel(image, prompt, grading_client, grading_deployment)
     tifa_align_score = vlm_results["tifa"]
     dsg_score = vlm_results["dsg"]
+    dsg_details = vlm_results.get("dsg_details")
     psg_score = vlm_results["psg"]
+    psg_details = vlm_results.get("psg_details")
     vpeval_score = vlm_results["vpeval"]
     
     if progress:
@@ -411,12 +504,17 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
 
 ---
 
-## ⭐ NORTH STAR METRIC
-Primary quality indicator based on atomic fact verification:
+## ⭐ NORTH STAR METRICS
+Primary quality indicators — three complementary faithfulness paradigms:
 
-| Metric | Score | Implementation |
-|--------|-------|----------------|
-| **Soft-TIFA GM** | **{tifa_gm_score:.2f}/100** | ✅ True probabilistic methodology ({len(atoms)} atoms verified) |
+| Metric | Score | Methodology |
+|--------|-------|-------------|
+| **Soft-TIFA GM** | **{tifa_gm_score:.2f}/100** | Probabilistic fact-checking ({len(atoms)} atoms, geometric mean) |
+| **DSG** | **{dsg_score:.2f}/100** | Davidsonian Scene Graph (binary VQA + dependency filtering) |
+| **PSG** | **{psg_score:.2f}/100** | Panoptic Scene Graph (structural graph matching) |
+
+**Why these scores?**
+{_build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_score, dsg_details, psg_score, psg_details)}
 
 ---
 
@@ -493,7 +591,9 @@ Responsible AI evaluation (T2ISafety Framework):
 
 | Category | Score |
 |----------|-------|
-| ⭐ North Star (Soft-TIFA GM) | **{tifa_gm_score:.2f}/100** |
+| ⭐ Soft-TIFA GM | **{tifa_gm_score:.2f}/100** |
+| ⭐ DSG | **{dsg_score:.2f}/100** |
+| ⭐ PSG | **{psg_score:.2f}/100** |
 | 🎯 Alignment Average | {avg_alignment:.2f}/100 |
 | 🖼️ Image Quality Average | {avg_quality:.2f}/100 |
 | 🛡️ Safety Average | {avg_safety:.2f}/100 |
@@ -1413,7 +1513,7 @@ This guide explains the metrics and report structure used to evaluate your gener
 
 Your report is organized in this order:
 
-1. **⭐ North Star Metric** - Primary quality indicator (Soft-TIFA GM)
+1. **⭐ North Star Metrics** - Primary quality indicators (Soft-TIFA GM, DSG, PSG)
 2. **🔬 Soft-TIFA Atomic Fact Verification** - Detailed breakdown of extracted criteria
 3. **💡 Expert VLM Evaluation** - GPT-4o subjective quality assessment
 4. **🎯 Alignment Metrics** - Text-image correspondence scores
@@ -1425,30 +1525,29 @@ Your report is organized in this order:
 
 ---
 
-## ⭐ NORTH STAR METRIC
+## ⭐ NORTH STAR METRICS
 
-### **Soft-TIFA GM** (Geometric Mean)
-- **What it measures**: Overall text-image alignment accuracy
-- **How it works**: 
-  1. GPT-4o extracts atomic facts from your prompt (e.g., "steampunk workshop", "brass gears", "mechanical owl")
-  2. Each fact is verified probabilistically in the image (0.0 to 1.0)
-  3. Geometric mean of all verification scores × 100 = final score
-- **Range**: 0-100 (higher = better alignment)
-- **Good score**: 80+
-- **Why it's the North Star**: Uses compositional AND logic - all facts must be present for a high score
+Three complementary faithfulness metrics, each representing a different evaluation paradigm:
 
-**Example**:
-```
-Prompt: "A steampunk workshop with brass gears and a mechanical owl"
+### **Soft-TIFA GM** — The Probabilistic Fact-Checker *(Meta, GenEval 2)*
+- **What it measures**: Probabilistic atom-level faithfulness
+- **How it works**: Extract atomic facts → score each via VLM token log-probabilities (0.0–1.0) → geometric mean
+- **Range**: 0-100 | **Good score**: 80+
+- **Strength**: Captures uncertainty — a shaky match scores 0.6, not 1.0. GM penalizes any single failed atom.
 
-Extracted Criteria:
-- A steampunk workshop setting: 1.00 ✓
-- Intricate brass gears: 1.00 ✓
-- A mechanical owl: 1.00 ✓
-- Owl perched on workbench: 0.50 (partially visible)
+### **DSG** — The Structural Logician *(Google, ICLR 2024)*
+- **What it measures**: Logical faithfulness with dependency validity
+- **How it works**: 3-stage LLM pipeline (tuples → questions → dependency DAG) → binary yes/no VQA → dependency filtering
+- **Range**: 0-100 | **Good score**: 70+
+- **Strength**: If an object is absent, its attributes/relations are automatically zeroed out (no false credit).
 
-Soft-TIFA GM = (1.0 × 1.0 × 1.0 × 0.5)^(1/4) × 100 = 84.1/100
-```
+### **PSG** — The Visual Surveyor *(ByteDance, ICCV 2025)*
+- **What it measures**: Structural scene-graph alignment
+- **How it works**: Build scene graphs from both prompt and image → match objects, attributes, relations → average sub-scores
+- **Range**: 0-100 | **Good score**: 70+
+- **Strength**: Evaluates objects, attributes, and relations as separate dimensions — penalizes extras and omissions.
+
+**Why three?** Each metric trusts a different signal: Soft-TIFA trusts token probabilities, DSG trusts logical structure, PSG trusts visual parsing. See the **🔍 DSG vs PSG vs Soft-TIFA** tab for live comparison experiments.
 
 ---
 

@@ -398,31 +398,33 @@ def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
     # Define metric functions to run in parallel
     def run_tifa():
         if cached_tifa is not None:
-            return ("tifa", cached_tifa)
+            return ("tifa", cached_tifa, None)
         score = calculate_tifa_score(image, prompt, client, model)
         _cache_set(cache_key, "tifa", score)
-        return ("tifa", score)
+        return ("tifa", score, None)
     
     def run_dsg():
         if cached_dsg is not None:
-            return ("dsg", cached_dsg)
-        score = calculate_dsg_score(image, prompt, client, model)
+            return ("dsg", cached_dsg, None)
+        detail = calculate_dsg_score_detailed(image, prompt, client, model)
+        score = detail.get('score', 0.0)
         _cache_set(cache_key, "dsg", score)
-        return ("dsg", score)
+        return ("dsg", score, detail)
     
     def run_psg():
         if cached_psg is not None:
-            return ("psg", cached_psg)
-        score = calculate_psg_score(image, prompt, client, model)
+            return ("psg", cached_psg, None)
+        detail = calculate_psg_score_detailed(image, prompt, client, model)
+        score = detail.get('score', 0.0)
         _cache_set(cache_key, "psg", score)
-        return ("psg", score)
+        return ("psg", score, detail)
     
     def run_vpeval():
         if cached_vpeval is not None:
-            return ("vpeval", cached_vpeval)
+            return ("vpeval", cached_vpeval, None)
         score = calculate_vpeval_score(image, prompt, client, model)
         _cache_set(cache_key, "vpeval", score)
-        return ("vpeval", score)
+        return ("vpeval", score, None)
     
     # Run all metrics in parallel using ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -435,8 +437,11 @@ def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
         
         for future in as_completed(futures):
             try:
-                metric_name, score = future.result()
-                results[metric_name] = score
+                result = future.result()
+                metric_name = result[0]
+                results[metric_name] = result[1]
+                if len(result) > 2 and result[2] is not None:
+                    results[f"{metric_name}_details"] = result[2]
             except Exception as e:
                 print(f"Error in parallel VLM metric: {e}")
     
@@ -444,7 +449,9 @@ def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
     return {
         "tifa": results.get("tifa", 0.0),
         "dsg": results.get("dsg", 0.0),
+        "dsg_details": results.get("dsg_details"),
         "psg": results.get("psg", 0.0),
+        "psg_details": results.get("psg_details"),
         "vpeval": results.get("vpeval", 0.0)
     }
 
