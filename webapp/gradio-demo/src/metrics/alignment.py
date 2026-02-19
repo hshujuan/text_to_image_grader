@@ -733,14 +733,19 @@ def calculate_dsg_score(image, prompt, client, model):
             answer = answer.replace(".", "").replace(",", "").replace("?", "").replace("!", "")
             return qid, answer
 
-        with ThreadPoolExecutor(max_workers=min(8, len(sorted_qids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(sorted_qids))) as executor:
             futures = [executor.submit(_ask_one, qid) for qid in sorted_qids]
             for fut in as_completed(futures):
                 try:
-                    qid, answer = fut.result()
+                    qid, answer = fut.result(timeout=120)
                     qid2answer[qid] = answer
                 except Exception as e:
                     print(f"DSG VQA error: {e}")
+        
+        # Ensure all qids have an answer (default 'no' for missing/failed)
+        for qid in sorted_qids:
+            if qid not in qid2answer:
+                qid2answer[qid] = 'no'
         
         # =====================================================================
         # Step 5: Dependency-aware scoring (from lib/DSG/dsg/vqa_utils.py)
@@ -871,14 +876,19 @@ def calculate_dsg_score_detailed(image, prompt, client, model):
             answer = answer.replace(".", "").replace(",", "").replace("?", "").replace("!", "")
             return qid, answer
 
-        with ThreadPoolExecutor(max_workers=min(8, len(sorted_qids))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(sorted_qids))) as executor:
             futures = [executor.submit(_ask_one_detailed, qid) for qid in sorted_qids]
             for fut in as_completed(futures):
                 try:
-                    qid, answer = fut.result()
+                    qid, answer = fut.result(timeout=120)
                     qid2answer[qid] = answer
                 except Exception as e:
                     print(f"DSG detailed VQA error: {e}")
+
+        # Ensure all qids have an answer (default 'no' for missing/failed)
+        for qid in sorted_qids:
+            if qid not in qid2answer:
+                qid2answer[qid] = 'no'
 
         # Stage 5: Dependency-aware scoring
         result = _calc_vqa_score_with_dependency(qid2answer, id2dependency)
@@ -1104,104 +1114,542 @@ def _calc_vqa_score_with_dependency(qid2answer, qid2dependency=None):
     }
 
 
-def calculate_psg_score_detailed(image, prompt, client, model):
+# =============================================================================
+# PSG-Score: Faithful implementation of ICCV 2025 paper
+# "Leveraging Panoptic Scene Graph for Evaluating Fine-Grained T2I Generation"
+# by Deng, Yang, Yu, Yang, Chen (ByteDance Seed)
+#
+# Pipeline:
+#   1. Extract ground-truth scene graph (G_gt) from the text prompt via GPT-4o
+#   2. Extract predicted scene graph (G_pred) from the generated image via GPT-4o
+#      (approximates the paper's panoptic segmentation + Set-of-Mark + VLM)
+#   3. Compute node matching and edge similarity using BERT embeddings
+#   4. Optimal graph matching via Hungarian algorithm + edge matching
+#   5. F1 score (precision/recall) with foreground-only FP penalty
+# =============================================================================
+
+# Lazy-loaded BERT model for semantic matching
+_PSG_BERT_MODEL = None
+
+def _get_psg_bert_model():
+    """Lazy-load a SentenceTransformer model for computing word embeddings."""
+    global _PSG_BERT_MODEL
+    if _PSG_BERT_MODEL is None:
+        from sentence_transformers import SentenceTransformer
+        _PSG_BERT_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+        print("PSG: Loaded SentenceTransformer (all-MiniLM-L6-v2) for semantic matching")
+    return _PSG_BERT_MODEL
+
+
+def _psg_cosine_distance(emb1, emb2):
+    """Compute cosine distance between two embedding vectors. Returns 0.0 (identical) to 2.0."""
+    from sklearn.metrics.pairwise import cosine_distances
+    d = cosine_distances(emb1.reshape(1, -1), emb2.reshape(1, -1))[0, 0]
+    return float(d)
+
+
+def _psg_node_matching(w1_emb, w2_emb):
     """
-    Calculate PSG score with full scene-graph details for comparison experiments.
+    Algorithm 1 NodeMatching: binary gate.
+    Returns 1.0 if cosine_distance < 0.5, else 0.
+    """
+    d = _psg_cosine_distance(w1_emb, w2_emb)
+    return 1.0 if d < 0.5 else 0.0
+
+
+def _psg_edge_similarity(w1, w2, w1_emb, w2_emb):
+    """
+    Algorithm 1 EdgeSimilarity: continuous.
+    Returns 1.0 if words are identical, else 1 - cosine_distance.
+    """
+    if w1.lower().strip() == w2.lower().strip():
+        return 1.0
+    d = _psg_cosine_distance(w1_emb, w2_emb)
+    return max(0.0, 1.0 - d)
+
+
+def _psg_extract_gt_scene_graph(prompt, client, model):
+    """
+    Extract ground-truth scene graph G_gt from the text prompt.
+    Paper: GPT-4o generates scene graph, then human verifies.
+    We use GPT-4o with structured output.
     
-    Returns:
-        dict with keys:
-          - score: float 0-100
-          - expected_objects: list
-          - expected_attributes: dict
-          - expected_relations: list
-          - object_score: float 0-100
-          - attribute_score: float 0-100
-          - relation_score: float 0-100
-          - error: str or None
+    Returns dict:
+      {
+        'nodes': [{'id': int, 'label': str, 'attributes': [str], 'is_foreground': bool}],
+        'edges': [{'src': int, 'dst': int, 'relation': str}]
+      }
     """
-    empty = {
-        'score': 0.0, 'expected_objects': [], 'expected_attributes': {},
-        'expected_relations': [], 'object_score': 0.0,
-        'attribute_score': 0.0, 'relation_score': 0.0, 'error': None,
-    }
-    try:
-        img_base64 = pil_to_base64(image)
+    sg_prompt = f"""Analyze this text prompt and extract a structured scene graph.
 
-        sg_prompt = f"""For the prompt: \"{prompt}\"
+Prompt: "{prompt}"
 
-Create an expected scene graph with:
-1. Objects that should appear
-2. Object attributes
-3. Relationships between objects
+Extract:
+1. All objects/entities mentioned (both foreground objects like "cat", "car" and background elements like "sky", "street", "grass")
+2. Attributes for each object (color, material, size, shape, state, texture, etc.)
+3. Relationships between objects (spatial: "on", "next to", "behind"; action: "riding", "holding", "wearing"; etc.)
+
+For each object, classify as foreground (specific countable objects like people, animals, vehicles, furniture) or background (scene elements like sky, ground, street, grass, water, wall).
 
 Return ONLY valid JSON:
 {{"scene_graph": {{
-    "objects": ["obj1", "obj2"],
-    "attributes": {{"obj1": ["attr1"], "obj2": ["attr2"]}},
-    "relations": ["obj1 relation obj2"]
-}}}}"""
-        sg_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Create scene graphs from prompts."},
-                {"role": "user", "content": sg_prompt}
-            ],
-            temperature=0.0, max_tokens=500,
-        )
-        if not sg_response.choices:
-            empty['error'] = 'No scene graph response'
-            return empty
-        sg_content = sg_response.choices[0].message.content.strip()
-        sg_content = sg_content.replace('```json', '').replace('```', '').strip()
-        expected_sg = json.loads(sg_content)['scene_graph']
+    "nodes": [
+        {{"id": 0, "label": "object_name", "attributes": ["attr1", "attr2"], "is_foreground": true}},
+        {{"id": 1, "label": "object_name", "attributes": ["attr1"], "is_foreground": false}}
+    ],
+    "edges": [
+        {{"src": 0, "dst": 1, "relation": "relationship_name"}}
+    ]
+}}}}
 
-        verify_prompt = f"""Analyze this image and compare to expected scene graph:
+Important:
+- Each unique object instance gets its own node (e.g., "two cats" → two separate cat nodes)
+- Include ALL attributes mentioned for each object
+- Include ALL relationships mentioned between objects
+- Label background elements (sky, ground, street, grass, water, room, etc.) as is_foreground=false"""
 
-Expected objects: {expected_sg.get('objects', [])}
-Expected attributes: {expected_sg.get('attributes', {})}
-Expected relations: {expected_sg.get('relations', [])}
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Extract structured scene graphs from text prompts. Be thorough and precise."},
+            {"role": "user", "content": sg_prompt}
+        ],
+        temperature=0.0,
+        max_tokens=1000,
+    )
+    content = resp.choices[0].message.content.strip()
+    content = content.replace('```json', '').replace('```', '').strip()
+    sg = json.loads(content)['scene_graph']
+    return sg
 
-Score each category 0-100:
-- object_score: How many expected objects are present?
-- attribute_score: How well do attributes match?
-- relation_score: How well do relationships match?
+
+def _psg_extract_pred_scene_graph(image, prompt, client, model):
+    """
+    Extract predicted scene graph G_pred from the generated image.
+    Paper: panoptic segmentation (FC-CLIP/kMaX-DeepLab) + Set-of-Mark + GPT-4o.
+    Approximation: GPT-4o vision extracts objects, attributes, relationships directly.
+    
+    Returns same structure as _psg_extract_gt_scene_graph.
+    """
+    img_base64 = pil_to_base64(image)
+
+    sg_prompt = f"""Look at this image carefully and extract a structured scene graph of EVERYTHING you see.
+
+The image was generated from this prompt: "{prompt}"
+But describe what you ACTUALLY see in the image, not what the prompt says.
+
+Extract:
+1. All objects/entities visible (both foreground objects and background elements)
+2. Attributes for each object (color, material, size, shape, state, texture, etc.)
+3. Relationships between objects (spatial, action, etc.)
+
+Classify each object as foreground (specific countable objects) or background (scene elements like sky, ground, etc.).
 
 Return ONLY valid JSON:
-{{"object_score": X, "attribute_score": X, "relation_score": X}}"""
-        verify_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Evaluate scene graph alignment."},
-                {"role": "user", "content": [
-                    {"type": "text", "text": verify_prompt},
-                    {"type": "image_url", "image_url": {"url": img_base64}}
-                ]}
-            ],
-            temperature=0.0, max_tokens=100,
-        )
-        if not verify_response.choices:
-            empty['error'] = 'No verification response'
-            empty['expected_objects'] = expected_sg.get('objects', [])
-            empty['expected_attributes'] = expected_sg.get('attributes', {})
-            empty['expected_relations'] = expected_sg.get('relations', [])
-            return empty
+{{"scene_graph": {{
+    "nodes": [
+        {{"id": 0, "label": "object_name", "attributes": ["attr1", "attr2"], "is_foreground": true}},
+        {{"id": 1, "label": "object_name", "attributes": ["attr1"], "is_foreground": false}}
+    ],
+    "edges": [
+        {{"src": 0, "dst": 1, "relation": "relationship_name"}}
+    ]
+}}}}
 
-        result_content = verify_response.choices[0].message.content.strip()
-        result_content = result_content.replace('```json', '').replace('```', '').strip()
-        scores = json.loads(result_content)
-        obj_s = scores.get('object_score', 0)
-        attr_s = scores.get('attribute_score', 0)
-        rel_s = scores.get('relation_score', 0)
-        avg_score = float(np.mean([obj_s, attr_s, rel_s]))
+Important:
+- Report what you ACTUALLY see, not what you expect
+- Each distinct object instance gets its own node
+- Include observed attributes (colors, states, materials)
+- Include observed relationships
+- Be comprehensive but accurate"""
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Extract structured scene graphs from images. Be thorough and accurate."},
+            {"role": "user", "content": [
+                {"type": "text", "text": sg_prompt},
+                {"type": "image_url", "image_url": {"url": img_base64}}
+            ]}
+        ],
+        temperature=0.0,
+        max_tokens=1000,
+    )
+    content = resp.choices[0].message.content.strip()
+    content = content.replace('```json', '').replace('```', '').strip()
+    sg = json.loads(content)['scene_graph']
+    return sg
+
+
+def _psg_semantic_graph_matching(gt_sg, pred_sg):
+    """
+    Algorithm 1: Semantic Graph Matching from the PSG-Score paper.
+    
+    Uses BERT embeddings for node matching (binary, threshold 0.5) and
+    edge similarity (continuous). Uses Hungarian algorithm for optimal
+    node matching, then matches edges between matched node pairs.
+    
+    Returns dict with TP, FP, FN, matched/unmatched details, precision, recall, F1.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    bert = _get_psg_bert_model()
+
+    gt_nodes = gt_sg.get('nodes', [])
+    pred_nodes = pred_sg.get('nodes', [])
+    gt_edges = gt_sg.get('edges', [])
+    pred_edges = pred_sg.get('edges', [])
+
+    if not gt_nodes:
+        # Nothing in ground truth → everything predicted is FP
+        fp_fg = sum(1 for n in pred_nodes if n.get('is_foreground', True))
+        return {
+            'precision': 0.0, 'recall': 0.0, 'f1': 0.0,
+            'tp': 0, 'fp': fp_fg, 'fn': 0,
+            'matched_nodes': [], 'matched_edges': [],
+            'unmatched_gt_nodes': [], 'unmatched_pred_nodes': pred_nodes,
+            'unmatched_gt_edges': [], 'unmatched_pred_edges': pred_edges,
+            'node_details': [], 'edge_details': [],
+            'attribute_precision': 0.0, 'attribute_recall': 0.0,
+        }
+
+    # =========================================================================
+    # Step 1: Encode all node labels with BERT
+    # =========================================================================
+    gt_labels = [n['label'].lower().strip() for n in gt_nodes]
+    pred_labels = [n['label'].lower().strip() for n in pred_nodes]
+    all_labels = gt_labels + pred_labels
+    
+    # Also encode all attributes and edge relations
+    gt_attrs_flat = []
+    for n in gt_nodes:
+        gt_attrs_flat.extend([a.lower().strip() for a in n.get('attributes', [])])
+    pred_attrs_flat = []
+    for n in pred_nodes:
+        pred_attrs_flat.extend([a.lower().strip() for a in n.get('attributes', [])])
+    
+    gt_edge_rels = [e['relation'].lower().strip() for e in gt_edges]
+    pred_edge_rels = [e['relation'].lower().strip() for e in pred_edges]
+    
+    # Batch encode everything
+    all_texts = list(set(all_labels + gt_attrs_flat + pred_attrs_flat + gt_edge_rels + pred_edge_rels))
+    if not all_texts:
+        all_texts = ['empty']
+    all_embeddings = bert.encode(all_texts, convert_to_numpy=True)
+    text2emb = {t: all_embeddings[i] for i, t in enumerate(all_texts)}
+
+    # =========================================================================
+    # Step 2: Node matching via Hungarian algorithm (Algorithm 1 NodeMatching)
+    # =========================================================================
+    n_gt = len(gt_nodes)
+    n_pred = len(pred_nodes)
+    
+    # Build cost matrix: cost = 1 - match_score (lower is better for Hungarian)
+    # NodeMatching returns 1.0 if cosine_distance < 0.5, else 0
+    cost_matrix = np.ones((n_gt, n_pred))  # default: no match (cost=1)
+    for i in range(n_gt):
+        for j in range(n_pred):
+            gt_emb = text2emb[gt_labels[i]]
+            pred_emb = text2emb[pred_labels[j]]
+            match = _psg_node_matching(gt_emb, pred_emb)
+            if match > 0:
+                cost_matrix[i, j] = 0.0  # matched: cost = 0
+
+    # Solve assignment (minimize cost)
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    
+    # Filter to only keep actual matches (cost == 0)
+    matched_node_pairs = []  # (gt_idx, pred_idx)
+    for r, c in zip(row_ind, col_ind):
+        if cost_matrix[r, c] == 0.0:
+            matched_node_pairs.append((r, c))
+    
+    gt_matched_idx = {r for r, c in matched_node_pairs}
+    pred_matched_idx = {c for r, c in matched_node_pairs}
+
+    matched_nodes_detail = []
+    for r, c in matched_node_pairs:
+        matched_nodes_detail.append({
+            'gt': gt_nodes[r]['label'],
+            'pred': pred_nodes[c]['label'],
+        })
+
+    unmatched_gt_nodes = [gt_nodes[i] for i in range(n_gt) if i not in gt_matched_idx]
+    unmatched_pred_nodes = [pred_nodes[j] for j in range(n_pred) if j not in pred_matched_idx]
+
+    # =========================================================================
+    # Step 3: Attribute matching for matched node pairs
+    # =========================================================================
+    total_gt_attrs = 0
+    total_matched_attrs = 0
+    total_pred_attrs = 0
+    attr_details = []
+    
+    for gt_idx, pred_idx in matched_node_pairs:
+        gt_node_attrs = [a.lower().strip() for a in gt_nodes[gt_idx].get('attributes', [])]
+        pred_node_attrs = [a.lower().strip() for a in pred_nodes[pred_idx].get('attributes', [])]
+        total_gt_attrs += len(gt_node_attrs)
+        total_pred_attrs += len(pred_node_attrs)
+        
+        # Match attributes using BERT similarity (threshold 0.5)
+        matched_in_pair = 0
+        pred_used = set()
+        for ga in gt_node_attrs:
+            ga_emb = text2emb.get(ga)
+            if ga_emb is None:
+                continue
+            best_j = -1
+            best_dist = 999
+            for j, pa in enumerate(pred_node_attrs):
+                if j in pred_used:
+                    continue
+                pa_emb = text2emb.get(pa)
+                if pa_emb is None:
+                    continue
+                d = _psg_cosine_distance(ga_emb, pa_emb)
+                if d < 0.5 and d < best_dist:
+                    best_dist = d
+                    best_j = j
+            if best_j >= 0:
+                matched_in_pair += 1
+                pred_used.add(best_j)
+                attr_details.append({
+                    'gt_attr': ga, 'pred_attr': pred_node_attrs[best_j],
+                    'object': gt_nodes[gt_idx]['label'],
+                })
+        total_matched_attrs += matched_in_pair
+
+    # =========================================================================
+    # Step 4: Edge matching (Algorithm 1 EdgeSimilarity)
+    # =========================================================================
+    # Build mapping from gt node idx → pred node idx
+    gt_to_pred_map = {r: c for r, c in matched_node_pairs}
+    
+    # For each GT edge, check if both endpoints are matched, then match relation
+    matched_edges = []
+    unmatched_gt_edges = []
+    pred_edges_used = set()
+    
+    for gt_edge in gt_edges:
+        src_gt = gt_edge['src']
+        dst_gt = gt_edge['dst']
+        rel_gt = gt_edge['relation'].lower().strip()
+        
+        # Find GT node indices that match these IDs
+        src_gt_idx = None
+        dst_gt_idx = None
+        for idx, n in enumerate(gt_nodes):
+            if n['id'] == src_gt:
+                src_gt_idx = idx
+            if n['id'] == dst_gt:
+                dst_gt_idx = idx
+        
+        if src_gt_idx is None or dst_gt_idx is None:
+            unmatched_gt_edges.append(gt_edge)
+            continue
+
+        # Check if both endpoints are matched
+        if src_gt_idx not in gt_to_pred_map or dst_gt_idx not in gt_to_pred_map:
+            unmatched_gt_edges.append(gt_edge)
+            continue
+
+        src_pred_idx = gt_to_pred_map[src_gt_idx]
+        dst_pred_idx = gt_to_pred_map[dst_gt_idx]
+        src_pred_id = pred_nodes[src_pred_idx]['id']
+        dst_pred_id = pred_nodes[dst_pred_idx]['id']
+        
+        # Find matching pred edge between same node pair
+        best_edge_idx = -1
+        best_sim = 0.0
+        for pe_idx, pe in enumerate(pred_edges):
+            if pe_idx in pred_edges_used:
+                continue
+            if pe['src'] == src_pred_id and pe['dst'] == dst_pred_id:
+                rel_pred = pe['relation'].lower().strip()
+                rel_gt_emb = text2emb.get(rel_gt)
+                rel_pred_emb = text2emb.get(rel_pred)
+                if rel_gt_emb is not None and rel_pred_emb is not None:
+                    sim = _psg_edge_similarity(rel_gt, rel_pred, rel_gt_emb, rel_pred_emb)
+                else:
+                    sim = 1.0 if rel_gt == rel_pred else 0.0
+                if sim > best_sim:
+                    best_sim = sim
+                    best_edge_idx = pe_idx
+            # Also check reversed direction (e.g., "A next to B" ≈ "B next to A")
+            elif pe['src'] == dst_pred_id and pe['dst'] == src_pred_id:
+                rel_pred = pe['relation'].lower().strip()
+                rel_gt_emb = text2emb.get(rel_gt)
+                rel_pred_emb = text2emb.get(rel_pred)
+                if rel_gt_emb is not None and rel_pred_emb is not None:
+                    sim = _psg_edge_similarity(rel_gt, rel_pred, rel_gt_emb, rel_pred_emb)
+                else:
+                    sim = 1.0 if rel_gt == rel_pred else 0.0
+                if sim > best_sim:
+                    best_sim = sim
+                    best_edge_idx = pe_idx
+
+        # Edge match threshold: similarity > 0.5 (semantic match)
+        if best_edge_idx >= 0 and best_sim >= 0.5:
+            matched_edges.append({
+                'gt_rel': rel_gt,
+                'pred_rel': pred_edges[best_edge_idx]['relation'],
+                'similarity': best_sim,
+                'gt_src': gt_nodes[src_gt_idx]['label'],
+                'gt_dst': gt_nodes[dst_gt_idx]['label'],
+            })
+            pred_edges_used.add(best_edge_idx)
+        else:
+            unmatched_gt_edges.append(gt_edge)
+
+    unmatched_pred_edges = [pred_edges[i] for i in range(len(pred_edges)) if i not in pred_edges_used]
+
+    # =========================================================================
+    # Step 5: Compute TP, FP, FN, Precision, Recall, F1 (Eq. 2 from paper)
+    # =========================================================================
+    # TP = matched nodes + matched attributes + matched edges
+    tp_nodes = len(matched_node_pairs)
+    tp_attrs = total_matched_attrs
+    tp_edges = len(matched_edges)
+    tp = tp_nodes + tp_attrs + tp_edges
+
+    # FN = unmatched GT nodes + unmatched GT attrs + unmatched GT edges
+    fn_nodes = len(unmatched_gt_nodes)
+    fn_attrs = total_gt_attrs - total_matched_attrs
+    fn_edges = len(unmatched_gt_edges)
+    fn = fn_nodes + fn_attrs + fn_edges
+
+    # FP = unmatched PRED nodes (FOREGROUND ONLY per paper) + unmatched pred attrs + unmatched pred edges
+    # Paper: "If the extra nodes exist in foreground, they will be counted as FP.
+    #         If the extra nodes exist in background then these nodes will be ignored."
+    fp_nodes = sum(1 for n in unmatched_pred_nodes if n.get('is_foreground', True))
+    fp_attrs = total_pred_attrs - total_matched_attrs  # extra predicted attributes 
+    fp_edges = len(unmatched_pred_edges)
+    fp = fp_nodes + fp_edges  # Paper focuses on nodes + edges for FP
+    # Note: attribute FP is not explicitly counted in paper's Eq(1), but we track it
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    # Compute sub-scores for backwards compatibility with UI
+    object_score = tp_nodes / (tp_nodes + fn_nodes) if (tp_nodes + fn_nodes) > 0 else 0.0
+    attribute_score = tp_attrs / (tp_attrs + fn_attrs) if (tp_attrs + fn_attrs) > 0 else 0.0
+    relation_score = tp_edges / (tp_edges + fn_edges) if (tp_edges + fn_edges) > 0 else 0.0
+
+    return {
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'tp': tp, 'fp': fp, 'fn': fn,
+        'tp_nodes': tp_nodes, 'tp_attrs': tp_attrs, 'tp_edges': tp_edges,
+        'fn_nodes': fn_nodes, 'fn_attrs': fn_attrs, 'fn_edges': fn_edges,
+        'fp_nodes': fp_nodes, 'fp_edges': fp_edges,
+        'matched_nodes': matched_nodes_detail,
+        'matched_edges': matched_edges,
+        'unmatched_gt_nodes': unmatched_gt_nodes,
+        'unmatched_pred_nodes': unmatched_pred_nodes,
+        'unmatched_gt_edges': unmatched_gt_edges,
+        'unmatched_pred_edges': unmatched_pred_edges,
+        'attribute_details': attr_details,
+        'object_score': object_score * 100,
+        'attribute_score': attribute_score * 100,
+        'relation_score': relation_score * 100,
+    }
+
+
+def calculate_psg_score_detailed(image, prompt, client, model):
+    """
+    Calculate PSG-Score with full pipeline details (faithful to ICCV 2025 paper).
+    
+    Pipeline:
+      1. Extract G_gt from prompt (GPT-4o)
+      2. Extract G_pred from image (GPT-4o vision)
+      3. Semantic graph matching (BERT embeddings + Hungarian algorithm)
+      4. F1 scoring with foreground-only FP penalty
+    
+    Returns:
+        dict with keys:
+          - score: float 0-100 (F1 * 100)
+          - precision: float 0-1
+          - recall: float 0-1
+          - expected_objects: list of GT object labels
+          - expected_attributes: dict of GT attributes
+          - expected_relations: list of GT relation strings
+          - detected_objects: list of predicted object labels
+          - object_score: float 0-100 (node recall)
+          - attribute_score: float 0-100 (attribute recall)
+          - relation_score: float 0-100 (edge recall)
+          - matched_nodes: list of matched node pairs
+          - matched_edges: list of matched edge details
+          - tp, fp, fn: int counts
+          - error: str or None
+    """
+    empty = {
+        'score': 0.0, 'precision': 0.0, 'recall': 0.0,
+        'expected_objects': [], 'expected_attributes': {},
+        'expected_relations': [], 'detected_objects': [],
+        'object_score': 0.0, 'attribute_score': 0.0, 'relation_score': 0.0,
+        'matched_nodes': [], 'matched_edges': [],
+        'tp': 0, 'fp': 0, 'fn': 0, 'error': None,
+    }
+    try:
+        print("PSG: Extracting ground-truth scene graph from prompt...")
+        gt_sg = _psg_extract_gt_scene_graph(prompt, client, model)
+        
+        print("PSG: Extracting predicted scene graph from image...")
+        pred_sg = _psg_extract_pred_scene_graph(image, prompt, client, model)
+        
+        print(f"PSG: G_gt has {len(gt_sg.get('nodes', []))} nodes, {len(gt_sg.get('edges', []))} edges")
+        print(f"PSG: G_pred has {len(pred_sg.get('nodes', []))} nodes, {len(pred_sg.get('edges', []))} edges")
+
+        print("PSG: Running semantic graph matching (BERT embeddings + Hungarian)...")
+        match_result = _psg_semantic_graph_matching(gt_sg, pred_sg)
+
+        f1 = match_result['f1']
+        print(f"PSG: F1={f1:.3f} (Precision={match_result['precision']:.3f}, Recall={match_result['recall']:.3f})")
+        print(f"PSG: TP={match_result['tp']} FP={match_result['fp']} FN={match_result['fn']}")
+
+        # Build legacy-compatible output
+        gt_objects = [n['label'] for n in gt_sg.get('nodes', [])]
+        gt_attrs = {}
+        for n in gt_sg.get('nodes', []):
+            if n.get('attributes'):
+                gt_attrs[n['label']] = n['attributes']
+        # Build id→label lookup for edge display
+        _id2label = {n['id']: n['label'] for n in gt_sg.get('nodes', [])}
+        gt_rels = [f"{_id2label.get(e['src'], '?')} {e['relation']} {_id2label.get(e['dst'], '?')}"
+                   for e in gt_sg.get('edges', [])]
+        detected_objects = [n['label'] for n in pred_sg.get('nodes', [])]
 
         return {
-            'score': avg_score,
-            'expected_objects': expected_sg.get('objects', []),
-            'expected_attributes': expected_sg.get('attributes', {}),
-            'expected_relations': expected_sg.get('relations', []),
-            'object_score': obj_s,
-            'attribute_score': attr_s,
-            'relation_score': rel_s,
+            'score': f1 * 100,
+            'precision': match_result['precision'],
+            'recall': match_result['recall'],
+            'expected_objects': gt_objects,
+            'expected_attributes': gt_attrs,
+            'expected_relations': gt_rels,
+            'detected_objects': detected_objects,
+            'object_score': match_result['object_score'],
+            'attribute_score': match_result['attribute_score'],
+            'relation_score': match_result['relation_score'],
+            'matched_nodes': match_result['matched_nodes'],
+            'matched_edges': match_result['matched_edges'],
+            'unmatched_gt_nodes': match_result.get('unmatched_gt_nodes', []),
+            'unmatched_pred_nodes': match_result.get('unmatched_pred_nodes', []),
+            'unmatched_gt_edges': match_result.get('unmatched_gt_edges', []),
+            'unmatched_pred_edges': match_result.get('unmatched_pred_edges', []),
+            'attribute_details': match_result.get('attribute_details', []),
+            'tp': match_result['tp'],
+            'fp': match_result['fp'],
+            'fn': match_result['fn'],
+            'tp_nodes': match_result.get('tp_nodes', 0),
+            'tp_attrs': match_result.get('tp_attrs', 0),
+            'tp_edges': match_result.get('tp_edges', 0),
+            'fn_nodes': match_result.get('fn_nodes', 0),
+            'fn_attrs': match_result.get('fn_attrs', 0),
+            'fn_edges': match_result.get('fn_edges', 0),
+            'fp_nodes': match_result.get('fp_nodes', 0),
+            'fp_edges': match_result.get('fp_edges', 0),
             'error': None,
         }
     except Exception as e:
@@ -1213,10 +1661,11 @@ Return ONLY valid JSON:
 
 def calculate_psg_score(image, prompt, client, model):
     """
-    Calculate PSG (Panoptic Scene Graph) score.
+    Calculate PSG-Score (ICCV 2025 paper faithful implementation).
     
-    PSG evaluates the image based on scene graph structure: objects,
-    their categories, and inter-object relationships.
+    Returns F1 score (0-100) from semantic graph matching between
+    the ground-truth scene graph (from prompt) and predicted scene graph
+    (from image).
     
     Args:
         image: PIL Image to evaluate
@@ -1225,88 +1674,11 @@ def calculate_psg_score(image, prompt, client, model):
         model: Model deployment name
     
     Returns:
-        float: PSG score 0-100
+        float: PSG-Score 0-100 (F1 * 100)
     """
     try:
-        img_base64 = pil_to_base64(image)
-        
-        # Generate expected scene graph from prompt
-        sg_prompt = f"""
-For the prompt: "{prompt}"
-
-Create an expected scene graph with:
-1. Objects that should appear
-2. Object attributes
-3. Relationships between objects
-
-Return ONLY valid JSON:
-{{"scene_graph": {{
-    "objects": ["obj1", "obj2"],
-    "attributes": {{"obj1": ["attr1"], "obj2": ["attr2"]}},
-    "relations": ["obj1 relation obj2"]
-}}}}
-"""
-        
-        sg_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Create scene graphs from prompts."},
-                {"role": "user", "content": sg_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=500
-        )
-        
-        if not sg_response.choices:
-            return 0.0
-        
-        sg_content = sg_response.choices[0].message.content.strip()
-        sg_content = sg_content.replace('```json', '').replace('```', '').strip()
-        expected_sg = json.loads(sg_content)['scene_graph']
-        
-        # Verify scene graph against image
-        verify_prompt = f"""
-Analyze this image and compare to expected scene graph:
-
-Expected objects: {expected_sg.get('objects', [])}
-Expected attributes: {expected_sg.get('attributes', {})}
-Expected relations: {expected_sg.get('relations', [])}
-
-Score each category 0-100:
-- object_score: How many expected objects are present?
-- attribute_score: How well do attributes match?
-- relation_score: How well do relationships match?
-
-Return ONLY valid JSON:
-{{"object_score": X, "attribute_score": X, "relation_score": X}}
-"""
-        
-        verify_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Evaluate scene graph alignment."},
-                {"role": "user", "content": [
-                    {"type": "text", "text": verify_prompt},
-                    {"type": "image_url", "image_url": {"url": img_base64}}
-                ]}
-            ],
-            temperature=0.0,
-            max_tokens=100
-        )
-        
-        if verify_response.choices:
-            result_content = verify_response.choices[0].message.content.strip()
-            result_content = result_content.replace('```json', '').replace('```', '').strip()
-            scores = json.loads(result_content)
-            avg_score = np.mean([
-                scores.get('object_score', 0),
-                scores.get('attribute_score', 0),
-                scores.get('relation_score', 0)
-            ])
-            return avg_score
-        
-        return 0.0
-        
+        result = calculate_psg_score_detailed(image, prompt, client, model)
+        return result['score']
     except Exception as e:
         print(f"PSG calculation error: {e}")
         return 0.0

@@ -36,7 +36,6 @@ from metrics import (
     # North Star Metric
     calculate_soft_tifa_score,
     calculate_soft_tifa_gm,
-    calculate_soft_tifa_am,
     
     # Image Quality Metrics
     calculate_brisque_score,
@@ -77,10 +76,14 @@ grading_api_version = os.environ.get("GRADING_API_VERSION", "2024-02-15-preview"
 
 # Initialize the Azure OpenAI Client for grading
 try:
+    from openai import AzureOpenAI
+    import httpx
     grading_client = AzureOpenAI(
         api_version=grading_api_version,
         azure_endpoint=grading_endpoint,
         api_key=grading_api_key,
+        timeout=httpx.Timeout(120.0, connect=30.0),  # 120s request timeout, 30s connect
+        max_retries=3,  # Retry on transient errors / rate limits
     )
     grading_enabled = True
 except Exception as e:
@@ -120,14 +123,139 @@ def prewarm_models():
     print(f"🔥 Models pre-warmed in {time.time() - start:.1f}s")
 
 
+def _build_psg_detail_section(psg_score, psg_details, psg_time=0):
+    """Build detailed PSG breakdown section for the grading report."""
+    if not psg_details or psg_details.get('error'):
+        err = psg_details.get('error', 'Unknown error') if psg_details else 'No details available'
+        return f"""## 🟢 PSG: PANOPTIC SCENE GRAPH MATCHING
+
+**Score:** {psg_score:.2f}/100 | ⚠️ Error: {err}
+"""
+    prec = psg_details.get('precision', 0)
+    rec = psg_details.get('recall', 0)
+    tp = psg_details.get('tp', 0)
+    fp = psg_details.get('fp', 0)
+    fn = psg_details.get('fn', 0)
+
+    lines = []
+    lines.append(f"## 🟢 PSG: PANOPTIC SCENE GRAPH MATCHING\n")
+    lines.append(f"**Score:** {psg_score:.2f}/100 (F1) | "
+                 f"**Precision:** {prec:.0%} | **Recall:** {rec:.0%} | "
+                 f"**TP:** {tp} **FP:** {fp} **FN:** {fn}")
+    if psg_time:
+        lines[-1] += f" | **Time:** {psg_time:.2f}s"
+    lines.append("")
+
+    # --- Ground-truth scene graph ---
+    gt_objs = psg_details.get('expected_objects', [])
+    gt_attrs = psg_details.get('expected_attributes', {})
+    gt_rels = psg_details.get('expected_relations', [])
+    lines.append("### Ground-Truth Scene Graph (from prompt)")
+    if gt_objs:
+        attr_strs = []
+        for obj in gt_objs:
+            attrs = gt_attrs.get(obj, [])
+            if attrs:
+                attr_strs.append(f"- **{obj}** — attributes: {', '.join(attrs)}")
+            else:
+                attr_strs.append(f"- **{obj}**")
+        lines.append("**Objects:**")
+        lines.extend(attr_strs)
+    if gt_rels:
+        lines.append(f"\n**Relations:** {' · '.join(gt_rels)}")
+    lines.append("")
+
+    # --- Predicted scene graph ---
+    pred_objs = psg_details.get('detected_objects', [])
+    lines.append("### Predicted Scene Graph (from image)")
+    if pred_objs:
+        lines.append(f"**Detected objects:** {', '.join(pred_objs)}")
+    else:
+        lines.append("**Detected objects:** (none)")
+    lines.append("")
+
+    # --- Matched nodes (TP) ---
+    matched_nodes = psg_details.get('matched_nodes', [])
+    if matched_nodes:
+        lines.append("### ✅ Matched Objects (TP)")
+        lines.append("| Ground Truth | Matched To |")
+        lines.append("|--------------|------------|")
+        for m in matched_nodes:
+            lines.append(f"| {m['gt']} | {m['pred']} |")
+        lines.append("")
+
+    # --- Matched attributes ---
+    attr_details = psg_details.get('attribute_details', [])
+    if attr_details:
+        lines.append("### ✅ Matched Attributes")
+        lines.append("| Object | Expected | Matched |")
+        lines.append("|--------|----------|---------|")
+        for a in attr_details:
+            lines.append(f"| {a['object']} | {a['gt_attr']} | {a['pred_attr']} |")
+        lines.append("")
+
+    # --- Matched edges ---
+    matched_edges = psg_details.get('matched_edges', [])
+    if matched_edges:
+        lines.append("### ✅ Matched Relations")
+        lines.append("| GT Relation | Predicted | Similarity |")
+        lines.append("|-------------|-----------|------------|")
+        for e in matched_edges:
+            lines.append(f"| {e['gt_src']} → {e['gt_rel']} → {e['gt_dst']} | {e['pred_rel']} | {e['similarity']:.2f} |")
+        lines.append("")
+
+    # --- Unmatched GT nodes (FN) ---
+    unmatched_gt = psg_details.get('unmatched_gt_nodes', [])
+    if unmatched_gt:
+        labels = [n['label'] if isinstance(n, dict) else str(n) for n in unmatched_gt]
+        lines.append(f"### ❌ Missing Objects (FN): {', '.join(labels)}")
+        lines.append("")
+
+    # --- Unmatched GT edges (FN) ---
+    unmatched_gt_edges = psg_details.get('unmatched_gt_edges', [])
+    if unmatched_gt_edges:
+        lines.append("### ❌ Missing Relations (FN)")
+        for e in unmatched_gt_edges:
+            if isinstance(e, dict):
+                lines.append(f"- {e.get('src', '?')} → {e.get('relation', '?')} → {e.get('dst', '?')}")
+            else:
+                lines.append(f"- {e}")
+        lines.append("")
+
+    # --- Unmatched pred nodes (FP) ---
+    unmatched_pred = psg_details.get('unmatched_pred_nodes', [])
+    if unmatched_pred:
+        fg = [n for n in unmatched_pred if (n.get('is_foreground', True) if isinstance(n, dict) else True)]
+        bg = [n for n in unmatched_pred if (not n.get('is_foreground', True) if isinstance(n, dict) else False)]
+        if fg:
+            fg_labels = [n['label'] if isinstance(n, dict) else str(n) for n in fg]
+            lines.append(f"### ⚠️ Extra Foreground Objects (FP): {', '.join(fg_labels)}")
+            lines.append("*These objects were detected in the image but not mentioned in the prompt, penalizing precision.*")
+            lines.append("")
+        if bg:
+            bg_labels = [n['label'] if isinstance(n, dict) else str(n) for n in bg]
+            lines.append(f"### 🔵 Extra Background Objects (ignored): {', '.join(bg_labels)}")
+            lines.append("*Background objects don't count as false positives per the PSG-Score paper.*")
+            lines.append("")
+
+    if fn == 0 and fp == 0:
+        lines.append("*Perfect match — all prompt elements found, no hallucinated foreground objects.*")
+    elif fn == 0 and fp > 0:
+        lines.append(f"*All prompt elements were found (recall=100%), but {fp} extra foreground object(s) detected in the image lowered precision to {prec:.0%}.*")
+    elif fn > 0 and fp == 0:
+        lines.append(f"*No hallucinations, but {fn} prompt element(s) were not found in the image (recall={rec:.0%}).*")
+
+    return "\n".join(lines)
+
+
 def _build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_score, dsg_details, psg_score, psg_details):
     """
-    Build concise interpretation text explaining WHY each North Star score
-    looks the way it does, based on the underlying data.
+    Build interpretation text explaining WHY each North Star score
+    looks the way it does, in clearly separated paragraphs.
     """
-    lines = []
+    sections = []
 
-    # --- Soft-TIFA GM ---
+    # ── Soft-TIFA GM ──
     if atoms and atom_scores:
         n = len(atoms)
         verified = sum(1 for s in atom_scores if s >= 0.9)
@@ -144,16 +272,18 @@ def _build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_scor
 
         interp = "; ".join(parts)
 
-        # Show weakest atoms (up to 2)
         sorted_pairs = sorted(zip(atom_scores, atoms))
         weakest = [(s, a) for s, a in sorted_pairs if s < 0.9][:2]
         if weakest:
             weak_str = ", ".join(f'"{a}" ({s:.2f})' for s, a in weakest)
             interp += f". Weakest: {weak_str}"
 
-        lines.append(f"> **Soft-TIFA GM ({tifa_gm_score:.1f}):** {interp}")
+        section = f"""**Soft-TIFA GM ({tifa_gm_score:.1f}/100)**
+Probabilistic fact-checking via VQA logprobs. Each atomic fact from the prompt is converted to a yes/no question, answered by GPT-4o with logprobs. The geometric mean enforces that ALL facts must be present — one missing element can pull the entire score to zero.
+> {interp}"""
+        sections.append(section)
 
-    # --- DSG ---
+    # ── DSG ──
     if dsg_details and not dsg_details.get('error'):
         questions = dsg_details.get('questions', {})
         answers = dsg_details.get('answers', {})
@@ -170,7 +300,6 @@ def _build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_scor
                        f"question{'s' if invalid_count > 1 else ''} (parent absent)")
             interp += f" — score w/o deps: {score_no_dep:.0f}, with deps: {dsg_score:.0f}"
 
-        # Show failed questions
         failed_qs = [questions[qid] for qid in sorted(answers) if answers.get(qid) != 'yes' and qid in questions]
         if failed_qs:
             shown = failed_qs[:2]
@@ -179,24 +308,63 @@ def _build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_scor
                 fail_str += f" (+{len(failed_qs) - 2} more)"
             interp += f". Failed: {fail_str}"
 
-        lines.append(f"> **DSG ({dsg_score:.1f}):** {interp}")
+        section = f"""**DSG ({dsg_score:.1f}/100)**
+Davidsonian Scene Graph decomposes the prompt into semantic tuples, generates yes/no questions with dependency links, then asks GPT-4o to answer each using the image. If a parent question is answered "no", its dependent children are automatically zeroed out.
+> {interp}"""
+        sections.append(section)
     elif dsg_details and dsg_details.get('error'):
-        lines.append(f"> **DSG ({dsg_score:.1f}):** Evaluation error — {dsg_details['error']}")
+        sections.append(f"""**DSG ({dsg_score:.1f}/100)**
+> Evaluation error — {dsg_details['error']}""")
 
-    # --- PSG ---
+    # ── PSG ──
     if psg_details and not psg_details.get('error'):
-        obj_s = psg_details.get('object_score', 0)
-        attr_s = psg_details.get('attribute_score', 0)
-        rel_s = psg_details.get('relation_score', 0)
+        prec = psg_details.get('precision', 0)
+        rec = psg_details.get('recall', 0)
+        tp = psg_details.get('tp', 0)
+        fp = psg_details.get('fp', 0)
+        fn = psg_details.get('fn', 0)
+        tp_nodes = psg_details.get('tp_nodes', 0)
+        tp_attrs = psg_details.get('tp_attrs', 0)
+        tp_edges = psg_details.get('tp_edges', 0)
+        fp_nodes = psg_details.get('fp_nodes', 0)
+        fp_edges = psg_details.get('fp_edges', 0)
+        fn_nodes = psg_details.get('fn_nodes', 0)
+        fn_attrs = psg_details.get('fn_attrs', 0)
+        fn_edges = psg_details.get('fn_edges', 0)
         objects = psg_details.get('expected_objects', [])
 
-        interp = f"Sub-scores — Objects: {obj_s:.0f}/100, Attributes: {attr_s:.0f}/100, Relations: {rel_s:.0f}/100"
+        interp = f"**F1 = {psg_score:.1f}** — Precision={prec:.0%} ({tp} correct out of {tp+fp} predicted), Recall={rec:.0%} ({tp} correct out of {tp+fn} expected)"
+        
+        # TP breakdown
+        tp_parts = []
+        if tp_nodes:
+            tp_parts.append(f"{tp_nodes} objects")
+        if tp_attrs:
+            tp_parts.append(f"{tp_attrs} attributes")
+        if tp_edges:
+            tp_parts.append(f"{tp_edges} relations")
+        if tp_parts:
+            interp += f". Matched: {' + '.join(tp_parts)} = {tp} TP"
 
-        # Identify weakest dimension
-        dims = {'Objects': obj_s, 'Attributes': attr_s, 'Relations': rel_s}
-        weakest_dim = min(dims, key=dims.get)
-        if dims[weakest_dim] < 80:
-            interp += f". Weakest dimension: {weakest_dim} ({dims[weakest_dim]:.0f})"
+        # FN breakdown (missing from image)
+        if fn > 0:
+            fn_parts = []
+            if fn_nodes:
+                fn_parts.append(f"{fn_nodes} objects")
+            if fn_attrs:
+                fn_parts.append(f"{fn_attrs} attributes")
+            if fn_edges:
+                fn_parts.append(f"{fn_edges} relations")
+            interp += f". Missing from image: {' + '.join(fn_parts)} = {fn} FN"
+
+        # FP breakdown (hallucinated)
+        if fp > 0:
+            fp_parts = []
+            if fp_nodes:
+                fp_parts.append(f"{fp_nodes} extra foreground objects")
+            if fp_edges:
+                fp_parts.append(f"{fp_edges} extra relations")
+            interp += f". Hallucinated: {' + '.join(fp_parts)} = {fp} FP (lowers precision)"
 
         if objects:
             obj_list = ", ".join(objects[:5])
@@ -204,11 +372,15 @@ def _build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_scor
                 obj_list += f" (+{len(objects) - 5} more)"
             interp += f". Expected objects: {obj_list}"
 
-        lines.append(f"> **PSG ({psg_score:.1f}):** {interp}")
+        section = f"""**PSG ({psg_score:.1f}/100)**
+Panoptic Scene Graph matching (ICCV 2025). Scene graphs are extracted from the prompt (ground truth) and the image (predicted), then matched using BERT embeddings + Hungarian algorithm. F1 balances recall (are all prompt elements present?) and precision (does the image add foreground objects not in the prompt?).
+> {interp}"""
+        sections.append(section)
     elif psg_details and psg_details.get('error'):
-        lines.append(f"> **PSG ({psg_score:.1f}):** Evaluation error — {psg_details['error']}")
+        sections.append(f"""**PSG ({psg_score:.1f}/100)**
+> Evaluation error — {psg_details['error']}""")
 
-    return "\n" + "\n".join(lines) + "\n" if lines else "\n"
+    return "\n\n".join(sections) if sections else ""
 
 
 def grade_image_quality_with_status(image, prompt, progress=None):
@@ -514,6 +686,7 @@ Primary quality indicators — three complementary faithfulness paradigms:
 | **PSG** | **{psg_score:.2f}/100** | Panoptic Scene Graph (structural graph matching) |
 
 **Why these scores?**
+
 {_build_north_star_interpretation(tifa_gm_score, atoms, atom_scores, dsg_score, dsg_details, psg_score, psg_details)}
 
 ---
@@ -526,6 +699,10 @@ Primary quality indicators — three complementary faithfulness paradigms:
 {atom_details}
 
 **Methodology:** True geometric mean of probabilistic fact verification (not VLM estimated)
+
+---
+
+{_build_psg_detail_section(psg_score, psg_details)}
 
 ---
 
@@ -1034,331 +1211,6 @@ def infer(prompt):
         return None, f"Error: {e}"
 
 
-# =============================================================================
-# Comparison Experiment: DSG vs PSG vs Soft-TIFA
-# =============================================================================
-
-def run_comparison_experiment(image, prompt, progress=gr.Progress()):
-    """
-    Run all three metrics on the same image+prompt and return rich breakdowns.
-    Yields incremental status updates.
-    """
-    if image is None:
-        yield "⚠️ Please provide an image.", "❌ No image provided"
-        return
-    if not prompt or not prompt.strip():
-        yield "⚠️ Please enter the text prompt.", "❌ No prompt provided"
-        return
-    if not grading_enabled:
-        yield "⚠️ Azure OpenAI not configured.", "❌ Grading not available"
-        return
-
-    yield "*Running comparison experiment...*", "📊 Starting comparison experiment..."
-
-    total_start = time.time()
-
-    # ---- Step 1: Soft-TIFA (GM + AM) ----
-    progress(0.05, desc="🔷 Running Soft-TIFA...")
-    yield "*Running comparison experiment...*", "🔷 **Step 1/3:** Calculating Soft-TIFA (GM + AM)..."
-    st_start = time.time()
-    st_gm_score, st_questions, st_scores = calculate_soft_tifa_gm(
-        image, prompt, grading_client, grading_deployment
-    )
-    st_am_score, _, _ = calculate_soft_tifa_am(
-        image, prompt, grading_client, grading_deployment
-    )
-    st_time = time.time() - st_start
-    progress(0.30, desc="🔷 Soft-TIFA complete ✓")
-    yield "*Running comparison experiment...*", f"🔷 **Step 1/3:** Soft-TIFA complete (GM={st_gm_score:.1f}, AM={st_am_score:.1f}) ✓"
-
-    # ---- Step 2: DSG (detailed) ----
-    progress(0.35, desc="🔶 Running DSG pipeline...")
-    yield "*Running comparison experiment...*", "🔶 **Step 2/3:** Running DSG 3-stage pipeline (tuples → questions → dependencies → VQA)..."
-    dsg_start = time.time()
-    dsg = calculate_dsg_score_detailed(image, prompt, grading_client, grading_deployment)
-    dsg_time = time.time() - dsg_start
-    progress(0.65, desc="🔶 DSG complete ✓")
-    yield "*Running comparison experiment...*", f"🔶 **Step 2/3:** DSG complete (score={dsg['score']:.1f}) ✓"
-
-    # ---- Step 3: PSG (detailed) ----
-    progress(0.70, desc="🟢 Running PSG scoring...")
-    yield "*Running comparison experiment...*", "🟢 **Step 3/3:** Running PSG scene-graph scoring..."
-    psg_start = time.time()
-    psg = calculate_psg_score_detailed(image, prompt, grading_client, grading_deployment)
-    psg_time = time.time() - psg_start
-    progress(0.90, desc="🟢 PSG complete ✓")
-    yield "*Running comparison experiment...*", f"🟢 **Step 3/3:** PSG complete (score={psg['score']:.1f}) ✓"
-
-    total_time = time.time() - total_start
-
-    # =================================================================
-    # Build the comparison report
-    # =================================================================
-
-    # --- Soft-TIFA section ---
-    st_atom_lines = []
-    for q, s in zip(st_questions, st_scores):
-        icon = "✅" if s >= 0.7 else ("⚠️" if s >= 0.3 else "❌")
-        bar = "█" * int(s * 20) + "░" * (20 - int(s * 20))
-        st_atom_lines.append(f"| {q} | {s:.3f} | {icon} {bar} |")
-    st_atom_table = "\n".join(st_atom_lines) if st_atom_lines else "| (no atoms extracted) | — | — |"
-
-    # --- DSG section ---
-    dsg_tuple_lines = []
-    for tid in sorted(dsg['tuples'].keys()):
-        dsg_tuple_lines.append(f"| {tid} | {dsg['tuples'][tid]} |")
-    dsg_tuple_table = "\n".join(dsg_tuple_lines) if dsg_tuple_lines else "| — | (none) |"
-
-    dsg_qa_lines = []
-    for qid in sorted(dsg['questions'].keys()):
-        q = dsg['questions'][qid]
-        ans = dsg['answers'].get(qid, '?')
-        raw = dsg['raw_scores'].get(qid, 0)
-        filt = dsg['filtered_scores'].get(qid, 0)
-        valid = dsg['validity'].get(qid, True)
-        deps = dsg['dependencies'].get(qid, [0])
-        dep_str = ", ".join(str(d) for d in deps) if deps != [0] else "none (root)"
-        ans_icon = "✅" if ans == "yes" else "❌"
-        dep_icon = "" if valid else " 🚫 (parent failed)"
-        dsg_qa_lines.append(
-            f"| {qid} | {q} | {ans_icon} {ans} | {int(raw)} | {int(filt)}{dep_icon} | {dep_str} |"
-        )
-    dsg_qa_table = "\n".join(dsg_qa_lines) if dsg_qa_lines else "| — | — | — | — | — | — |"
-
-    # Build dependency DAG visualization (text-based)
-    dsg_dag_lines = []
-    roots = [qid for qid in sorted(dsg['dependencies'].keys())
-             if dsg['dependencies'].get(qid) == [0] or dsg['dependencies'].get(qid, [0]) == [0]]
-    children_map = {}  # parent -> [children]
-    for qid, parents in dsg['dependencies'].items():
-        for p in parents:
-            if p != 0:
-                children_map.setdefault(p, []).append(qid)
-
-    def _render_dag(node, prefix="", is_last=True):
-        q_text = dsg['questions'].get(node, "?")
-        score = dsg['filtered_scores'].get(node, 0)
-        icon = "✅" if score > 0 else "❌"
-        connector = "└── " if is_last else "├── "
-        dsg_dag_lines.append(f"{prefix}{connector}Q{node}: {q_text} → {icon}")
-        kids = children_map.get(node, [])
-        for i, kid in enumerate(kids):
-            child_prefix = prefix + ("    " if is_last else "│   ")
-            _render_dag(kid, child_prefix, i == len(kids) - 1)
-
-    for i, root in enumerate(roots):
-        q_text = dsg['questions'].get(root, "?")
-        score = dsg['filtered_scores'].get(root, 0)
-        icon = "✅" if score > 0 else "❌"
-        dsg_dag_lines.append(f"Q{root}: {q_text} → {icon}")
-        kids = children_map.get(root, [])
-        for j, kid in enumerate(kids):
-            _render_dag(kid, "", j == len(kids) - 1)
-        if i < len(roots) - 1:
-            dsg_dag_lines.append("")
-
-    dsg_dag_text = "\n".join(dsg_dag_lines) if dsg_dag_lines else "(no dependency graph)"
-
-    # --- PSG section ---
-    psg_obj_str = ", ".join(psg['expected_objects']) if psg['expected_objects'] else "(none)"
-    psg_attr_lines = []
-    for obj, attrs in psg['expected_attributes'].items():
-        psg_attr_lines.append(f"- **{obj}**: {', '.join(attrs)}")
-    psg_attr_str = "\n".join(psg_attr_lines) if psg_attr_lines else "- (none)"
-    psg_rel_str = "\n".join(f"- {r}" for r in psg['expected_relations']) if psg['expected_relations'] else "- (none)"
-
-    # --- Analysis section ---
-    # Determine score spread and generate analysis
-    scores = {
-        'Soft-TIFA GM': st_gm_score,
-        'Soft-TIFA AM': st_am_score,
-        'DSG': dsg['score'],
-        'PSG': psg['score'],
-    }
-    max_metric = max(scores, key=scores.get)
-    min_metric = min(scores, key=scores.get)
-    spread = scores[max_metric] - scores[min_metric]
-
-    analysis_lines = []
-
-    # GM vs AM gap
-    gm_am_gap = abs(st_gm_score - st_am_score)
-    if gm_am_gap > 10:
-        low_atoms = [q for q, s in zip(st_questions, st_scores) if s < 0.5]
-        analysis_lines.append(
-            f"**GM vs AM gap = {gm_am_gap:.1f}**: The geometric mean is significantly lower than "
-            f"the arithmetic mean, indicating that {'some atoms scored very low' if low_atoms else 'score variance is high'}. "
-            f"GM penalizes any single failed atom harshly (multiplicative), while AM treats all atoms equally (additive). "
-            f"{'Low-scoring atoms: ' + '; '.join(low_atoms[:3]) if low_atoms else ''}"
-        )
-    else:
-        analysis_lines.append(
-            f"**GM ≈ AM (gap = {gm_am_gap:.1f})**: All atoms scored relatively consistently — "
-            f"no single atom is dragging the GM down."
-        )
-
-    # DSG dependency impact
-    dep_impact = dsg['score_without_dep'] - dsg['score']
-    if dep_impact > 0.1:
-        zeroed = [f"Q{qid}" for qid, v in dsg['validity'].items() if not v]
-        analysis_lines.append(
-            f"**DSG dependency filtering reduced score by {dep_impact:.1f}**: "
-            f"Questions {', '.join(zeroed)} were zeroed out because their parent entity/attribute "
-            f"was not detected. This is DSG's logical guardrail — it prevents scoring attributes "
-            f"of objects that don't exist in the image."
-        )
-    elif dsg['score'] > 0:
-        analysis_lines.append(
-            f"**DSG dependency filtering had {'minimal' if dep_impact > 0 else 'no'} impact**: "
-            f"All parent questions passed, so all child questions were valid to score."
-        )
-
-    # DSG vs Soft-TIFA comparison
-    dsg_st_gap = abs(dsg['score'] - st_gm_score)
-    if dsg_st_gap > 15:
-        if dsg['score'] > st_gm_score:
-            analysis_lines.append(
-                f"**DSG ({dsg['score']:.1f}) > Soft-TIFA GM ({st_gm_score:.1f})**: "
-                f"DSG's binary scoring may be more lenient here — a borderline 'yes' answer scores 1.0, "
-                f"while Soft-TIFA's probabilistic scoring captures the VLM's uncertainty as a continuous value. "
-                f"A 'shaky yes' in DSG = 1.0, but in Soft-TIFA it might be 0.6."
-            )
-        else:
-            analysis_lines.append(
-                f"**Soft-TIFA GM ({st_gm_score:.1f}) > DSG ({dsg['score']:.1f})**: "
-                f"Some DSG questions got hard 'no' answers (0.0), while Soft-TIFA's soft probabilities "
-                f"kept those atoms above zero. Binary scoring amplifies failures."
-            )
-
-    # PSG discussion
-    if psg['score'] > 0:
-        psg_sub_scores = [psg['object_score'], psg['attribute_score'], psg['relation_score']]
-        weakest_idx = psg_sub_scores.index(min(psg_sub_scores))
-        categories = ['object presence', 'attribute accuracy', 'relation accuracy']
-        analysis_lines.append(
-            f"**PSG breakdown**: Objects={psg['object_score']:.0f}, Attributes={psg['attribute_score']:.0f}, "
-            f"Relations={psg['relation_score']:.0f}. Weakest dimension: **{categories[weakest_idx]}**. "
-            f"Unlike DSG/Soft-TIFA which ask questions, PSG compares structured scene graphs — "
-            f"it can penalize extra objects (precision) and missing objects (recall) structurally."
-        )
-
-    # Overall
-    if spread > 20:
-        analysis_lines.append(
-            f"**Large score spread ({spread:.1f} points)**: This {prompt[:60]}... prompt reveals "
-            f"meaningful differences in what each metric measures. The highest scorer "
-            f"(**{max_metric}: {scores[max_metric]:.1f}**) and lowest (**{min_metric}: {scores[min_metric]:.1f}**) "
-            f"reflect fundamentally different evaluation philosophies."
-        )
-
-    analysis_text = "\n\n".join(f"- {line}" for line in analysis_lines)
-
-    # =================================================================
-    # Assemble final report
-    # =================================================================
-    report = f"""# 🔬 Comparison Experiment: DSG vs PSG vs Soft-TIFA
-
-**Prompt:** *"{prompt}"*
-
----
-
-## 📊 Score Summary
-
-| Metric | Score | Type | Time |
-|--------|-------|------|------|
-| 🔷 **Soft-TIFA GM** | **{st_gm_score:.1f}**/100 | Probabilistic × Geometric Mean | {st_time:.1f}s |
-| 🔷 **Soft-TIFA AM** | **{st_am_score:.1f}**/100 | Probabilistic × Arithmetic Mean | (shared) |
-| 🔶 **DSG** | **{dsg['score']:.1f}**/100 | Binary + Dependency Filtering | {dsg_time:.1f}s |
-| 🔶 DSG (no deps) | {dsg['score_without_dep']:.1f}/100 | Binary, no filtering | (shared) |
-| 🟢 **PSG** | **{psg['score']:.1f}**/100 | Scene Graph F1 | {psg_time:.1f}s |
-| | | **Total** | **{total_time:.1f}s** |
-
----
-
-## 🔷 Soft-TIFA: Probabilistic Atom Verification
-
-**Method:** Extract atomic facts from prompt → ask VQA questions → score each using VLM token log-probabilities → aggregate via GM (strict) or AM (average).
-
-**Score: GM = {st_gm_score:.1f} | AM = {st_am_score:.1f}** ({len(st_questions)} atoms)
-
-| Atom (Question → Expected Answer) | Probability | Confidence |
-|-----|------|------|
-{st_atom_table}
-
-**How to read:** Each score is the **sum of token probabilities** for the expected answer from the VLM's vocabulary. A score of 0.95 means the VLM is 95% confident the atom is present. GM multiplies all probabilities (one low atom crashes the score); AM averages them.
-
----
-
-## 🔶 DSG: Davidsonian Scene Graph (3-Stage Pipeline)
-
-**Method:** Prompt → semantic tuples (23-shot ICL) → yes/no questions (23-shot ICL) → dependency DAG (23-shot ICL) → binary VQA → dependency-filtered scoring.
-
-**Score: {dsg['score']:.1f}** (before deps: {dsg['score_without_dep']:.1f}) | {len(dsg['questions'])} questions
-
-### Stage 1: Semantic Tuples
-| ID | Tuple |
-|----|-------|
-{dsg_tuple_table}
-
-### Stage 2 + 4: Questions & VQA Answers
-| ID | Question | Answer | Raw | Filtered | Dependencies |
-|----|----------|--------|-----|----------|--------------|
-{dsg_qa_table}
-
-### Stage 3: Dependency DAG
-```
-{dsg_dag_text}
-```
-
-**How to read:** Each question gets a binary yes/no from the VLM → 1 or 0. If a parent question scored 0 (e.g., "Is there a cat?" → No), all child questions (color, count, relations) are automatically zeroed out. This prevents scoring attributes of non-existent objects.
-
----
-
-## 🟢 PSG: Panoptic Scene Graph Matching
-
-**Method:** Parse prompt → expected scene graph (objects, attributes, relations) → verify each category against the image → average sub-scores.
-
-**Score: {psg['score']:.1f}**
-
-### Expected Scene Graph (from prompt)
-**Objects:** {psg_obj_str}
-
-**Attributes:**
-{psg_attr_str}
-
-**Relations:**
-{psg_rel_str}
-
-### Sub-Scores
-| Category | Score | Description |
-|----------|-------|-------------|
-| 🟦 Objects | {psg['object_score']:.0f}/100 | Are expected objects present? |
-| 🟨 Attributes | {psg['attribute_score']:.0f}/100 | Do attributes match? (colors, materials, etc.) |
-| 🟧 Relations | {psg['relation_score']:.0f}/100 | Are spatial/action relations correct? |
-
-**How to read:** PSG skips question-asking entirely. It builds a structured graph from both the prompt and the image, then scores overlap. Extra objects hurt precision; missing objects hurt recall. The F1-style average reflects structural completeness.
-
----
-
-## 🧠 Analysis: Why Do the Scores Differ?
-
-{analysis_text}
-
----
-
-## 📖 Key Takeaways
-
-| Dimension | Soft-TIFA 🔷 | DSG 🔶 | PSG 🟢 |
-|-----------|-------------|--------|--------|
-| **Score type** | Continuous (0.0–1.0) | Binary (0 or 1) | Category-level (0–100) |
-| **Uncertainty** | Captured via log-probs | Discarded | Via similarity thresholds |
-| **Dependencies** | None (atoms independent) | DAG enforced | Implicit in graph matching |
-| **Paradigm** | QG/A (probabilistic) | QG/A (logical) | Scene graph matching |
-| **Best for** | Templated prompts | Open-ended prompts | Multi-object scenes |
-"""
-
-    yield report, f"✅ **Experiment complete!** ({total_time:.1f}s total)"
-
 with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
     # Header with title and author info aligned right
     with gr.Row():
@@ -1547,7 +1399,7 @@ Three complementary faithfulness metrics, each representing a different evaluati
 - **Range**: 0-100 | **Good score**: 70+
 - **Strength**: Evaluates objects, attributes, and relations as separate dimensions — penalizes extras and omissions.
 
-**Why three?** Each metric trusts a different signal: Soft-TIFA trusts token probabilities, DSG trusts logical structure, PSG trusts visual parsing. See the **🔍 DSG vs PSG vs Soft-TIFA** tab for live comparison experiments.
+**Why three?** Each metric trusts a different signal: Soft-TIFA trusts token probabilities, DSG trusts logical structure, PSG trusts visual parsing.
 
 ---
 
@@ -1680,49 +1532,6 @@ All use GPT-4o to analyze potential ethical and safety concerns:
 
 **This demonstrates why RAI testing matters!** T2I models can generate sensitive content.
             """)
-
-        with gr.TabItem("🔍 DSG vs PSG vs Soft-TIFA"):
-            gr.Markdown("""
-# 🔬 Live Comparison Experiment: DSG vs PSG vs Soft-TIFA
-Run all three metrics on the **same image + prompt** and see exactly how each one decomposes, scores, and aggregates — with full pipeline breakdowns and analysis of why scores differ.
-
-*Based on ["The Trinity of Atomic Faithfulness"](https://medium.com/@shujuanhuang/the-trinity-of-atomic-faithfulness-dsg-psg-and-soft-tifa-3c4557b12c5b) by Jane Huang*
-            """)
-
-            gr.Markdown("### 💡 Suggested experiment prompts" + " " + "*(first 3 from [GenEval2](https://github.com/facebookresearch/GenEval2) benchmark with pre-defined VQA atoms):*")
-            with gr.Row():
-                cmp_s1 = gr.Button("🟢 GenEval2 Easy: a elephant and a purple kangaroo", size="sm")
-                cmp_s2 = gr.Button("🟡 GenEval2 Spatial: a candle, and a blue truck in front of a cookie", size="sm")
-            with gr.Row():
-                cmp_s3 = gr.Button("🔴 GenEval2 Hard: four yellow candles on top of a spotted raccoon jumping over four stone koalas", size="sm")
-                cmp_s4 = gr.Button("🟣 Complex (free-text): A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk", size="sm")
-
-            cmp_prompt = gr.Textbox(
-                label="Text prompt used to generate the image",
-                placeholder="Enter the exact prompt used to generate your image...",
-                lines=2,
-            )
-            cmp_image = gr.Image(label="Upload or paste the generated image", type="pil", height=350)
-
-            cmp_btn = gr.Button("🚀 Run Comparison Experiment", variant="primary", size="lg")
-
-            cmp_status = gr.Markdown(value="", label="Status")
-            cmp_report = gr.Markdown(
-                value="*Upload an image and enter the prompt, then click **Run Comparison Experiment** to see all three metrics side by side.*",
-                label="Comparison Report",
-            )
-
-            # Wire up sample prompt buttons
-            cmp_s1.click(lambda: "a elephant and a purple kangaroo", outputs=cmp_prompt)
-            cmp_s2.click(lambda: "a candle, and a blue truck in front of a cookie", outputs=cmp_prompt)
-            cmp_s3.click(lambda: "four yellow candles on top of a spotted raccoon jumping over four stone koalas", outputs=cmp_prompt)
-            cmp_s4.click(lambda: "A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk", outputs=cmp_prompt)
-
-            cmp_btn.click(
-                fn=run_comparison_experiment,
-                inputs=[cmp_image, cmp_prompt],
-                outputs=[cmp_report, cmp_status],
-            )
 
 if __name__ == "__main__":
     # Pre-warm ML models at startup for faster first grading

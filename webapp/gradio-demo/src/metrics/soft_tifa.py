@@ -505,17 +505,17 @@ def _build_answer_variants(question: str, answer: str) -> list:
 
 def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -> float:
     """
-    Query VQA model via OpenAI API and get soft score for a single question.
+    Query VQA model via OpenAI API and get a continuous soft score (0.0-1.0).
     
-    Following GenEval2 methodology:
-    - For counting questions: Check if the answer word or its numeric equivalent is present
-    - For Yes/No questions: Check if "Yes" is the response
+    Uses token logprobs from GPT-4o (works for vision/multimodal requests).
+    Sums the probabilities of all answer variant tokens from the top-10 logprobs,
+    matching GenEval2's softmax-based scoring methodology.
     
-    Returns a soft score between 0.0 and 1.0 based on model confidence.
+    Returns a soft score between 0.0 and 1.0 based on model token probabilities.
     """
     answer_variants = _build_answer_variants(question, answer)
     
-    vqa_prompt = f"""{question} Answer in one word."""
+    vqa_prompt = f"{question} Answer in one word."
     
     try:
         resp = client.chat.completions.create(
@@ -526,62 +526,37 @@ def _vqa_score_single(question: str, answer: str, img_b64: str, client, model) -
             ]}],
             temperature=0.0,
             max_tokens=10,
-            logprobs=True,  # Request log probabilities if supported
-            top_logprobs=10
+            logprobs=True,
+            top_logprobs=10,
         )
         
-        response_text = resp.choices[0].message.content.strip()
-        
-        # Try to extract probability from logprobs if available
+        # Extract probability from logprobs (first token only, matching GenEval2)
         if hasattr(resp.choices[0], 'logprobs') and resp.choices[0].logprobs:
             logprobs = resp.choices[0].logprobs
             if hasattr(logprobs, 'content') and logprobs.content:
-                # Sum probabilities for all answer variants (matching GenEval2 behavior)
+                # Only look at the FIRST token (the actual answer token)
+                first_token = logprobs.content[0]
                 total_prob = 0.0
-                seen_tokens = set()  # Avoid double-counting
-                for token_info in logprobs.content:
-                    if hasattr(token_info, 'top_logprobs'):
-                        for top_lp in token_info.top_logprobs:
-                            token_text = top_lp.token
-                            if token_text not in seen_tokens and \
-                               any(token_text == av or token_text.strip().lower() == av.strip().lower() 
-                                   for av in answer_variants):
-                                total_prob += math.exp(top_lp.logprob)
-                                seen_tokens.add(token_text)
-                if total_prob > 0:
-                    return min(1.0, total_prob)
+                seen_tokens = set()
+                if hasattr(first_token, 'top_logprobs'):
+                    for top_lp in first_token.top_logprobs:
+                        token_text = top_lp.token
+                        # Exact match against answer variants (case-sensitive, 
+                        # with stripped comparison as fallback)
+                        if token_text not in seen_tokens:
+                            for av in answer_variants:
+                                if token_text == av or token_text.strip() == av.strip():
+                                    total_prob += math.exp(top_lp.logprob)
+                                    seen_tokens.add(token_text)
+                                    break
+                return min(1.0, total_prob)
         
-        # Fallback: Binary check with confidence estimation
-        response_lower = response_text.lower().strip()
-        
-        # Check for exact or partial match
+        # Fallback if logprobs not returned (shouldn't happen with GPT-4o)
+        response_text = resp.choices[0].message.content.strip().lower()
         for av in answer_variants:
-            if av.lower().strip() in response_lower or response_lower in av.lower().strip():
-                return 1.0  # Strong match
-        
-        # For counting questions, check numeric equivalence
-        if question.lower().startswith("how many"):
-            try:
-                # Try to extract a number from the response
-                num_match = re.search(r'\d+', response_text)
-                expected_num = _return_numeric_string(answer)
-                if num_match and expected_num != 'other':
-                    if num_match.group(0) == expected_num:
-                        return 1.0
-                    # Partial credit for close counts
-                    diff = abs(int(num_match.group(0)) - int(expected_num))
-                    if diff == 1:
-                        return 0.5
-                    elif diff == 2:
-                        return 0.25
-            except:
-                pass
-        
-        # Check for negative responses
-        if any(neg in response_lower for neg in ['no', 'not', 'none', 'zero', '0']):
-            return 0.0
-            
-        return 0.0
+            if av.lower().strip() in response_text:
+                return 0.95  # High but not 1.0 since we lack probability info
+        return 0.05  # Low but not 0.0 since we lack probability info
         
     except Exception as e:
         print(f"VQA query failed: {e}")
@@ -664,7 +639,7 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm",
             return idx, _vqa_score_single(question, answer, img_b64, client, model)
 
         score_list = [0.0] * len(vqa_list)
-        with ThreadPoolExecutor(max_workers=min(8, len(vqa_list))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, len(vqa_list))) as executor:
             futures = [
                 executor.submit(_score_one, (i, qa))
                 for i, qa in enumerate(vqa_list)
@@ -682,13 +657,18 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm",
     # Aggregate scores
     if method == "gm":
         # Geometric Mean (prompt-level) - following GenEval2
-        # Add small epsilon to avoid zero multiplication issues
-        epsilon = 1e-10
-        adjusted_scores = [max(s, epsilon) for s in score_list]
-        final_score = float(gmean(adjusted_scores))
+        # If ANY atom scores 0.0, GM is 0.0 (true compositional AND logic)
+        if any(s == 0.0 for s in score_list):
+            final_score = 0.0
+        else:
+            final_score = float(gmean(score_list))
     else:
         # Arithmetic Mean (atom-level)
         final_score = sum(score_list) / len(score_list)
+    
+    # Round to 4 decimal places to avoid floating-point artifacts
+    # (e.g. gmean([1.0]*8) can return 0.9999... instead of 1.0)
+    final_score = round(final_score, 4)
     
     return float(final_score * 100), questions, score_list
 
