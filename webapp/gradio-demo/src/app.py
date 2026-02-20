@@ -139,104 +139,13 @@ def _build_psg_detail_section(psg_score, psg_details, psg_time=0):
 
     lines = []
     lines.append(f"## 🟢 PSG: PANOPTIC SCENE GRAPH MATCHING\n")
-    lines.append(f"**Score:** {psg_score:.2f}/100 (F1) | "
-                 f"**Precision:** {prec:.0%} | **Recall:** {rec:.0%} | "
-                 f"**TP:** {tp} **FP:** {fp} **FN:** {fn}")
+    score_line = (f"**Score:** {psg_score:.2f}/100 (F1) | "
+                  f"**Precision:** {prec:.0%} | **Recall:** {rec:.0%} | "
+                  f"**TP:** {tp} **FP:** {fp} **FN:** {fn}")
     if psg_time:
-        lines[-1] += f" | **Time:** {psg_time:.2f}s"
+        score_line += f" | **Time:** {psg_time:.2f}s"
+    lines.append(score_line)
     lines.append("")
-
-    # --- Ground-truth scene graph ---
-    gt_objs = psg_details.get('expected_objects', [])
-    gt_attrs = psg_details.get('expected_attributes', {})
-    gt_rels = psg_details.get('expected_relations', [])
-    lines.append("### Ground-Truth Scene Graph (from prompt)")
-    if gt_objs:
-        attr_strs = []
-        for obj in gt_objs:
-            attrs = gt_attrs.get(obj, [])
-            if attrs:
-                attr_strs.append(f"- **{obj}** — attributes: {', '.join(attrs)}")
-            else:
-                attr_strs.append(f"- **{obj}**")
-        lines.append("**Objects:**")
-        lines.extend(attr_strs)
-    if gt_rels:
-        lines.append(f"\n**Relations:** {' · '.join(gt_rels)}")
-    lines.append("")
-
-    # --- Predicted scene graph ---
-    pred_objs = psg_details.get('detected_objects', [])
-    lines.append("### Predicted Scene Graph (from image)")
-    if pred_objs:
-        lines.append(f"**Detected objects:** {', '.join(pred_objs)}")
-    else:
-        lines.append("**Detected objects:** (none)")
-    lines.append("")
-
-    # --- Matched nodes (TP) ---
-    matched_nodes = psg_details.get('matched_nodes', [])
-    if matched_nodes:
-        lines.append("### ✅ Matched Objects (TP)")
-        lines.append("| Ground Truth | Matched To |")
-        lines.append("|--------------|------------|")
-        for m in matched_nodes:
-            lines.append(f"| {m['gt']} | {m['pred']} |")
-        lines.append("")
-
-    # --- Matched attributes ---
-    attr_details = psg_details.get('attribute_details', [])
-    if attr_details:
-        lines.append("### ✅ Matched Attributes")
-        lines.append("| Object | Expected | Matched |")
-        lines.append("|--------|----------|---------|")
-        for a in attr_details:
-            lines.append(f"| {a['object']} | {a['gt_attr']} | {a['pred_attr']} |")
-        lines.append("")
-
-    # --- Matched edges ---
-    matched_edges = psg_details.get('matched_edges', [])
-    if matched_edges:
-        lines.append("### ✅ Matched Relations")
-        lines.append("| GT Relation | Predicted | Similarity |")
-        lines.append("|-------------|-----------|------------|")
-        for e in matched_edges:
-            lines.append(f"| {e['gt_src']} → {e['gt_rel']} → {e['gt_dst']} | {e['pred_rel']} | {e['similarity']:.2f} |")
-        lines.append("")
-
-    # --- Unmatched GT nodes (FN) ---
-    unmatched_gt = psg_details.get('unmatched_gt_nodes', [])
-    if unmatched_gt:
-        labels = [n['label'] if isinstance(n, dict) else str(n) for n in unmatched_gt]
-        lines.append(f"### ❌ Missing Objects (FN): {', '.join(labels)}")
-        lines.append("")
-
-    # --- Unmatched GT edges (FN) ---
-    unmatched_gt_edges = psg_details.get('unmatched_gt_edges', [])
-    if unmatched_gt_edges:
-        lines.append("### ❌ Missing Relations (FN)")
-        for e in unmatched_gt_edges:
-            if isinstance(e, dict):
-                lines.append(f"- {e.get('src', '?')} → {e.get('relation', '?')} → {e.get('dst', '?')}")
-            else:
-                lines.append(f"- {e}")
-        lines.append("")
-
-    # --- Unmatched pred nodes (FP) ---
-    unmatched_pred = psg_details.get('unmatched_pred_nodes', [])
-    if unmatched_pred:
-        fg = [n for n in unmatched_pred if (n.get('is_foreground', True) if isinstance(n, dict) else True)]
-        bg = [n for n in unmatched_pred if (not n.get('is_foreground', True) if isinstance(n, dict) else False)]
-        if fg:
-            fg_labels = [n['label'] if isinstance(n, dict) else str(n) for n in fg]
-            lines.append(f"### ⚠️ Extra Foreground Objects (FP): {', '.join(fg_labels)}")
-            lines.append("*These objects were detected in the image but not mentioned in the prompt, penalizing precision.*")
-            lines.append("")
-        if bg:
-            bg_labels = [n['label'] if isinstance(n, dict) else str(n) for n in bg]
-            lines.append(f"### 🔵 Extra Background Objects (ignored): {', '.join(bg_labels)}")
-            lines.append("*Background objects don't count as false positives per the PSG-Score paper.*")
-            lines.append("")
 
     if fn == 0 and fp == 0:
         lines.append("*Perfect match — all prompt elements found, no hallucinated foreground objects.*")
@@ -244,6 +153,8 @@ def _build_psg_detail_section(psg_score, psg_details, psg_time=0):
         lines.append(f"*All prompt elements were found (recall=100%), but {fp} extra foreground object(s) detected in the image lowered precision to {prec:.0%}.*")
     elif fn > 0 and fp == 0:
         lines.append(f"*No hallucinations, but {fn} prompt element(s) were not found in the image (recall={rec:.0%}).*")
+    else:
+        lines.append(f"*{fn} prompt element(s) missing and {fp} extra foreground object(s) detected.*")
 
     return "\n".join(lines)
 
@@ -1236,7 +1147,7 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
                 sample1 = gr.Button("🟢 GenEval2 Easy: a elephant and a purple kangaroo", size="sm")
                 sample2 = gr.Button("🟡 GenEval2 Spatial: a candle, and a blue truck in front of a cookie", size="sm")
             with gr.Row():
-                sample3 = gr.Button("🔴 GenEval2 Hard: four yellow candles on top of a spotted raccoon jumping over four stone koalas", size="sm")
+                sample3 = gr.Button("🔴 GenEval2 Hard: seven wooden rabbits, and three green horses in front of a striped chair", size="sm")
                 sample4 = gr.Button("🟣 Complex (free-text): A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk", size="sm")
             
             with gr.Row():
@@ -1274,7 +1185,7 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
             # Click handlers for sample prompts
             sample1.click(lambda: "a elephant and a purple kangaroo", outputs=prompt)
             sample2.click(lambda: "a candle, and a blue truck in front of a cookie", outputs=prompt)
-            sample3.click(lambda: "four yellow candles on top of a spotted raccoon jumping over four stone koalas", outputs=prompt)
+            sample3.click(lambda: "seven wooden rabbits, and three green horses in front of a striped chair", outputs=prompt)
             sample4.click(lambda: "A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk", outputs=prompt)
             
             # Generate image button - clears status on new generation

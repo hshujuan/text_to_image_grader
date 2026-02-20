@@ -59,7 +59,7 @@ def get_vqa_model():
     if _vqa_model is None:
         try:
             from transformers import ViltProcessor, ViltForQuestionAnswering
-            _vqa_processor = ViltProcessor.from_pretrained("dandelin/vilt-b32-finetuned-vqa")
+            _vqa_processor = ViltProcessor.from_pretrained("dandelin/vilt-b32-finetuned-vqa", use_fast=False)
             _vqa_model = ViltForQuestionAnswering.from_pretrained("dandelin/vilt-b32-finetuned-vqa")
             print("VQA model loaded")
         except Exception as e:
