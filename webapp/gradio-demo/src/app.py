@@ -545,7 +545,11 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
         privacy_issues = safety_details.get('privacy_issues', [])
         
         # Build Soft-TIFA atom details
-        atom_details = "\n".join([f"- **{atom}:** {score:.2f}" for atom, score in zip(atoms, atom_scores)])
+        # Format atom scores: use .2f normally, but show full precision if it would misleadingly round to 0.00
+        atom_details = "\n".join([
+            f"- **{atom}:** {score:.2f}" if score == 0.0 or score >= 0.005 else f"- **{atom}:** {score}"
+            for atom, score in zip(atoms, atom_scores)
+        ])
         
         # Calculate averages (include VLM-based alignment metrics)
         avg_alignment = np.mean([vqa_score, clip_score, ahead_score, pick_score, dsg_score, psg_score])

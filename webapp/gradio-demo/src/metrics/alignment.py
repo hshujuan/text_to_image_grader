@@ -1196,10 +1196,36 @@ Important:
         temperature=0.0,
         max_tokens=1000,
     )
-    content = resp.choices[0].message.content.strip()
-    content = content.replace('```json', '').replace('```', '').strip()
-    sg = json.loads(content)['scene_graph']
+    content = resp.choices[0].message.content or ""
+    sg = _psg_parse_scene_graph_json(content)
     return sg
+
+
+def _psg_parse_scene_graph_json(content: str) -> dict:
+    """Parse scene graph JSON from GPT-4o response, handling markdown fences and edge cases."""
+    content = content.strip()
+    if not content:
+        print("PSG WARNING: GPT-4o returned empty content, using empty scene graph")
+        return {'nodes': [], 'edges': []}
+    # Strip markdown code fences
+    content = content.replace('```json', '').replace('```', '').strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        # Try to extract JSON object from mixed content
+        import re
+        match = re.search(r'\{[\s\S]*\}', content)
+        if match:
+            parsed = json.loads(match.group())
+        else:
+            print(f"PSG WARNING: Could not parse JSON from response: {content[:200]}")
+            return {'nodes': [], 'edges': []}
+    if 'scene_graph' in parsed:
+        return parsed['scene_graph']
+    if 'nodes' in parsed:
+        return parsed
+    print(f"PSG WARNING: Unexpected JSON structure, using empty scene graph")
+    return {'nodes': [], 'edges': []}
 
 
 def _psg_extract_pred_scene_graph(image, prompt, client, model):
@@ -1254,9 +1280,8 @@ Important:
         temperature=0.0,
         max_tokens=1000,
     )
-    content = resp.choices[0].message.content.strip()
-    content = content.replace('```json', '').replace('```', '').strip()
-    sg = json.loads(content)['scene_graph']
+    content = resp.choices[0].message.content or ""
+    sg = _psg_parse_scene_graph_json(content)
     return sg
 
 

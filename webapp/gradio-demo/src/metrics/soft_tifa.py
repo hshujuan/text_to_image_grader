@@ -657,6 +657,9 @@ def soft_tifa(image, prompt: str, client, model, method: str = "gm",
     # Aggregate scores
     if method == "gm":
         # Geometric Mean (prompt-level) - following GenEval2
+        # Floor near-zero scores (< 0.01) to 0.0 so compositional AND logic
+        # works correctly — a score of 0.003 from the VLM means "absent"
+        score_list = [0.0 if s < 0.01 else s for s in score_list]
         # If ANY atom scores 0.0, GM is 0.0 (true compositional AND logic)
         if any(s == 0.0 for s in score_list):
             final_score = 0.0
