@@ -12,7 +12,7 @@
 |-----------|-----------------|
 | [webapp/gradio-demo/src/metrics/__init__.py](../webapp/gradio-demo/src/metrics/__init__.py) | Module structure, exported functions, metric hierarchy (North Star → Supporting) |
 | [webapp/gradio-demo/src/metrics/soft_tifa.py](../webapp/gradio-demo/src/metrics/soft_tifa.py) | North Star metric implementation: atomic fact extraction, batch/parallel verification, geometric mean calculation |
-| [webapp/gradio-demo/src/metrics/alignment.py](../webapp/gradio-demo/src/metrics/alignment.py) | All alignment metrics: CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval implementations |
+| [webapp/gradio-demo/src/metrics/alignment.py](../webapp/gradio-demo/src/metrics/alignment.py) | All alignment metrics: CLIPScore, VQAScore, AHEaD, PickScore, DSG, PSG implementations |
 | [webapp/gradio-demo/src/metrics/image_quality.py](../webapp/gradio-demo/src/metrics/image_quality.py) | Image quality metrics: BRISQUE (piq), NIQE (pyiqa), CLIP-IQA (pyiqa) with fallbacks |
 | [webapp/gradio-demo/src/metrics/safety.py](../webapp/gradio-demo/src/metrics/safety.py) | T2ISafety framework: Toxicity, Fairness, Privacy evaluation via GPT-4o |
 | [webapp/gradio-demo/src/metrics/utils.py](../webapp/gradio-demo/src/metrics/utils.py) | Utility functions: `pil_to_base64`, lazy-loaded CLIP/VQA model singletons |
@@ -39,7 +39,6 @@ graph TB
         subgraph "2. Alignment Metrics"
             direction LR
             MODEL["Model-Based<br/>(Fast)"]
-            VLM["VLM-Based<br/>(GPT-4o)"]
         end
         
         subgraph "3. Image Quality"
@@ -54,7 +53,6 @@ graph TB
         
         INPUT --> SOFT_TIFA & DSG_NS & PSG_NS
         INPUT --> MODEL
-        INPUT --> VLM
         INPUT --> BRISQUE & NIQE & CLIPIQA
         INPUT --> SAFETY
         
@@ -62,9 +60,6 @@ graph TB
         MODEL --> VQA["VQAScore"]
         MODEL --> AHEAD["AHEaD"]
         MODEL --> PICK["PickScore"]
-        
-        VLM --> TIFA["TIFA"]
-        VLM --> VPEVAL["VPEval"]
     end
 ```
 
@@ -178,25 +173,21 @@ def get_clip_model():
     return _clip_model, _clip_preprocess
 ```
 
-#### VLM-Based (GPT-4o, Slower)
+#### VLM-Based (GPT-4o)
 
-| Metric | Method | Source Lines |
-|--------|--------|--------------|
-| **TIFA** | QA pair generation → verification | alignment.py:315-400 |
-| **VPEval** | Visual Programming modular steps | alignment.py:585-689 |
+*TIFA and VPEval were removed — Soft-TIFA GM already covers probabilistic fact-checking, and DSG/PSG provide stronger structural signals.*
 
-*Note: DSG and PSG have been promoted to North Star metrics.*
+*DSG and PSG have been promoted to North Star metrics.*
 
 ```mermaid
 flowchart TD
-    subgraph "VLM Metric Pattern"
+    subgraph "Alignment Metric Pattern"
         A[Prompt] -->|GPT-4o| B[Extract Structure]
         B --> C{Metric Type}
-        C -->|TIFA| D[QA Pairs]
-        C -->|VPEval| G[Visual Program]
+        C -->|DSG| D[Dependency DAG + VQA]
+        C -->|PSG| E[Scene Graph Matching]
         
-        D & G -->|GPT-4o + Image| H[Verify Each Element]
-        H --> I[Average Scores]
+        D & E --> F[Final Score]
     end
 ```
 
@@ -306,11 +297,6 @@ sequenceDiagram
     METRICS-->>APP: Alignment scores
     
     Note over APP: Step 5/6 (58%)
-    APP->>METRICS: TIFA → VPEval
-    METRICS->>AZURE: Sequential VLM calls
-    METRICS-->>APP: VLM alignment scores
-    
-    Note over APP: Step 6/6 (75%)
     APP->>AZURE: Qualitative VLM evaluation
     AZURE-->>APP: Streaming response
     
@@ -349,7 +335,7 @@ transformers                 # ViLT (VQA), PickScore
 clip (openai)                # AHEaD, fallback CLIPScore
 
 # VLM Integration
-azure-ai-inference           # GPT-4o for TIFA, DSG, PSG, VPEval, Safety, Soft-TIFA
+azure-ai-inference           # GPT-4o for DSG, PSG, Safety, Soft-TIFA
 
 # Fallbacks
 opencv-python                # Image processing fallbacks

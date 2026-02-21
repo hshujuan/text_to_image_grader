@@ -1174,11 +1174,11 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
                         label="Quality Assessment"
                     )
 
-            # Click handlers for sample prompts
-            sample1.click(lambda: "a elephant and a purple kangaroo", outputs=prompt)
-            sample2.click(lambda: "a candle, and a blue truck in front of a cookie", outputs=prompt)
-            sample3.click(lambda: "seven wooden rabbits, and three green horses in front of a striped chair", outputs=prompt)
-            sample4.click(lambda: "A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk", outputs=prompt)
+            # Click handlers for sample prompts (queue=False for instant response)
+            sample1.click(lambda: "a elephant and a purple kangaroo", outputs=prompt, queue=False, show_progress="hidden")
+            sample2.click(lambda: "a candle, and a blue truck in front of a cookie", outputs=prompt, queue=False, show_progress="hidden")
+            sample3.click(lambda: "seven wooden rabbits, and three green horses in front of a striped chair", outputs=prompt, queue=False, show_progress="hidden")
+            sample4.click(lambda: "A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk", outputs=prompt, queue=False, show_progress="hidden")
             
             # Generate image button - clears status on new generation
             generate_btn.click(

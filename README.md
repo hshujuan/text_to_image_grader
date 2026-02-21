@@ -40,9 +40,7 @@ The evaluation system uses **three complementary North Star metrics**, each repr
 - **AHEaD**: Alignment Head score using CLIP attention (✅ model-based)
 - **PickScore**: Human preference proxy using CLIP + aesthetics
 
-#### VLM-Based (GPT-4o)
-- **TIFA**: Text-to-Image Faithfulness via QA pair verification
-- **VPEval**: Visual Programming evaluation
+*TIFA and VPEval were removed — Soft-TIFA GM already covers probabilistic fact-checking, and DSG/PSG provide stronger structural signals.*
 
 ### 🖼️ Technical Image Quality Metrics  
 These metrics evaluate image quality independent of the text prompt:
@@ -70,7 +68,7 @@ text_to_image_grader/
 │       │       ├── __init__.py    # Module exports
 │       │       ├── utils.py       # Shared utilities (pil_to_base64, model loaders)
 │       │       ├── soft_tifa.py   # North Star: Soft-TIFA GM implementation
-│       │       ├── alignment.py   # CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
+│       │       ├── alignment.py   # CLIPScore, VQAScore, AHEaD, PickScore, DSG, PSG
 │       │       ├── image_quality.py # BRISQUE, NIQE, CLIP-IQA
 │       │       └── safety.py      # T2ISafety evaluation
 │       ├── tests/                 # Test suite
@@ -143,7 +141,7 @@ The application has three tabs:
 2. **Generate Image**: Click "🚀 Generate Image" to create an image using Azure DALL-E 3
 
 3. **Grade Quality**: Click "📊 Grade Image Quality" to run comprehensive evaluation
-   - Progress bar shows 6 steps: Soft-TIFA GM → T2ISafety → Image Quality → Model Alignment → VLM Alignment → Expert Evaluation
+   - Progress bar shows 6 steps: Soft-TIFA GM → T2ISafety → Image Quality → Model Alignment → DSG + PSG → Expert Evaluation
    - Report order: North Star → Soft-TIFA Details → Expert VLM Evaluation → Alignment → Image Quality → Safety → Overall Summary
    - Performance metrics displayed under the generated image
 
