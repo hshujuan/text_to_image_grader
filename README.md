@@ -1,6 +1,6 @@
 # Azure DALL-E 3 Text-to-Image Generator & Grader
 
-A comprehensive Gradio web app for generating and evaluating text-to-image outputs using Azure OpenAI DALL-E 3 and GPT-4o, with real metric calculations — not LLM estimates.
+A comprehensive Gradio web app for generating and evaluating text-to-image outputs using Azure OpenAI DALL-E 3 and GPT-4o.
 
 ## Features
 
@@ -9,7 +9,6 @@ A comprehensive Gradio web app for generating and evaluating text-to-image outpu
 ⭐ **Three North Star Metrics**: Soft-TIFA GM, DSG, and PSG for multi-paradigm faithfulness  
 📊 **Batch Processing**: CSV-based batch generation and grading with smart caching  
 ⚡ **Performance Tracking**: Time-to-first-token and detailed timing metrics  
-🔬 **Real Metrics**: Actual model-based calculations (CLIP, VQA, etc.)  
 🧪 **GenEval2 Benchmark**: Built-in prompts from the [GenEval2](https://github.com/facebookresearch/GenEval2) benchmark with pre-defined VQA atoms
 
 📖 **[Read the Metrics Guide](TechnicalDocs/METRICS_GUIDE.md)** to understand what each metric measures and how to interpret your results.
@@ -100,7 +99,7 @@ text_to_image_grader/
 1. Clone the repository and install dependencies:
 
 ```powershell
-git clone <repository-url>
+git clone https://github.com/hshujuan/text_to_image_grader.git
 cd text_to_image_grader/webapp/gradio-demo
 python -m pip install -r requirements.txt
 ```
