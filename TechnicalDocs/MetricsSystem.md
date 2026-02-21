@@ -30,8 +30,10 @@ graph TB
     subgraph "Metrics Architecture"
         INPUT[/"Image + Prompt"/]
         
-        subgraph "1. North Star"
-            SOFT_TIFA["⭐ Soft-TIFA GM<br/>Atomic Fact Verification"]
+        subgraph "1. North Star Metrics"
+            SOFT_TIFA["⭐ Soft-TIFA GM<br/>Probabilistic Fact-Checking"]
+            DSG_NS["⭐ DSG<br/>Structural Logic"]
+            PSG_NS["⭐ PSG<br/>Scene Graph Matching"]
         end
         
         subgraph "2. Alignment Metrics"
@@ -50,7 +52,7 @@ graph TB
             SAFETY["T2ISafety<br/>Toxicity | Fairness | Privacy"]
         end
         
-        INPUT --> SOFT_TIFA
+        INPUT --> SOFT_TIFA & DSG_NS & PSG_NS
         INPUT --> MODEL
         INPUT --> VLM
         INPUT --> BRISQUE & NIQE & CLIPIQA
@@ -62,8 +64,6 @@ graph TB
         MODEL --> PICK["PickScore"]
         
         VLM --> TIFA["TIFA"]
-        VLM --> DSG["DSG"]
-        VLM --> PSG["PSG"]
         VLM --> VPEVAL["VPEval"]
     end
 ```
@@ -72,11 +72,15 @@ graph TB
 
 ## Metric Categories
 
-### 1. North Star Metric: Soft-TIFA GM
+### 1. North Star Metrics: Soft-TIFA GM, DSG, PSG
+
+Three complementary faithfulness metrics, each representing a different evaluation paradigm.
+
+#### Soft-TIFA GM — The Probabilistic Fact-Checker *(Meta, GenEval 2)*
 
 **Source:** [soft_tifa.py](../webapp/gradio-demo/src/metrics/soft_tifa.py) lines 44-85
 
-The North Star metric uses a **pure geometric mean** of atomic fact verification scores.
+Uses a **pure geometric mean** of atomic fact verification scores.
 
 #### Algorithm Flow
 
@@ -179,9 +183,9 @@ def get_clip_model():
 | Metric | Method | Source Lines |
 |--------|--------|--------------|
 | **TIFA** | QA pair generation → verification | alignment.py:315-400 |
-| **DSG** | Davidsonian Scene Graph primitives | alignment.py:407-495 |
-| **PSG** | Panoptic Scene Graph (objects, attributes, relations) | alignment.py:498-582 |
 | **VPEval** | Visual Programming modular steps | alignment.py:585-689 |
+
+*Note: DSG and PSG have been promoted to North Star metrics.*
 
 ```mermaid
 flowchart TD
@@ -189,11 +193,9 @@ flowchart TD
         A[Prompt] -->|GPT-4o| B[Extract Structure]
         B --> C{Metric Type}
         C -->|TIFA| D[QA Pairs]
-        C -->|DSG| E[Semantic Primitives]
-        C -->|PSG| F[Scene Graph]
         C -->|VPEval| G[Visual Program]
         
-        D & E & F & G -->|GPT-4o + Image| H[Verify Each Element]
+        D & G -->|GPT-4o + Image| H[Verify Each Element]
         H --> I[Average Scores]
     end
 ```
@@ -285,6 +287,11 @@ sequenceDiagram
     METRICS->>AZURE: Verify atoms (batch)
     METRICS-->>APP: (score, atoms, scores)
     
+    Note over APP: Step 1b - DSG + PSG
+    APP->>METRICS: DSG + PSG evaluation
+    METRICS->>AZURE: Scene graph extraction + matching
+    METRICS-->>APP: North Star scores
+    
     Note over APP: Step 2/6 (18%)
     APP->>METRICS: evaluate_t2i_safety()
     METRICS->>AZURE: T2ISafety eval
@@ -299,7 +306,7 @@ sequenceDiagram
     METRICS-->>APP: Alignment scores
     
     Note over APP: Step 5/6 (58%)
-    APP->>METRICS: TIFA → DSG → PSG → VPEval
+    APP->>METRICS: TIFA → VPEval
     METRICS->>AZURE: Sequential VLM calls
     METRICS-->>APP: VLM alignment scores
     
@@ -356,6 +363,8 @@ scikit-image                 # Image conversion utilities
 | Category | Metric | Good Score | Interpretation |
 |----------|--------|------------|----------------|
 | **North Star** | Soft-TIFA GM | 80+ | All atomic facts present |
+| **North Star** | DSG | 70+ | Logical structure verified |
+| **North Star** | PSG | 70+ | Scene graph alignment |
 | **Alignment** | CLIPScore, VQAScore | 70+ | Strong text-image match |
 | **Alignment** | AHEaD | 60+ | Fine-grained attention alignment |
 | **Quality** | BRISQUE, NIQE | 80+ | High technical quality |
@@ -366,7 +375,7 @@ scikit-image                 # Image conversion utilities
 
 ## Key Design Decisions
 
-1. **Geometric Mean for Soft-TIFA**: A single missing fact (0.0) tanks the entire score, enforcing compositional completeness
+1. **Three North Star Metrics**: Soft-TIFA GM, DSG, and PSG each trust a different signal (probabilities, logical structure, visual parsing) for robust faithfulness evaluation
 2. **Lazy Model Loading**: Models loaded on first use, cached globally to avoid repeated loading
 3. **Parallel Execution**: Independent metrics (image quality, model-based alignment) run in `ThreadPoolExecutor`
 4. **Graceful Fallbacks**: Every metric has a fallback path if primary package unavailable
