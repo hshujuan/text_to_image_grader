@@ -3,47 +3,45 @@
 ## 📐 Design Philosophy
 
 The redesigned grader follows a **hierarchical metric structure** with clear separation between:
-1. **North Star Metric** (Primary quality indicator)
+1. **North Star Metrics** (Three complementary faithfulness indicators)
 2. **Supporting Metrics** (Multi-dimensional quality assessment)
 
 ---
 
-## ⭐ North Star Metric: Soft-TIFA GM
+## ⭐ North Star Metrics
 
-### What is Soft-TIFA?
+Three complementary faithfulness metrics, each representing a different evaluation paradigm:
+
+### 1. Soft-TIFA GM — The Probabilistic Fact-Checker *(Meta, GenEval 2)*
+
 **Soft-TIFA (Soft Text-Image Faithfulness through Atomic evaluation)** measures how well an image satisfies atomic visual criteria extracted from the prompt.
 
-### Why Geometric Mean (GM)?
+- **Methodology:** Extract atomic facts → score each via VLM token log-probabilities (0.0–1.0) → geometric mean
 - **Compositional AND Logic:** All criteria must be satisfied (not just averaged)
 - **Penalizes Missing Elements:** A single 0 score results in 0 overall score
-- **Balanced Assessment:** Better reflects human judgment on completeness
+- **Range:** 0-100 | **Good score:** 80+
 
-### Methodology:
 ```
-1. Extract 5-8 atomic facts from prompt
-   Examples: "a red car", "on a highway", "sunny weather"
-
-2. Score each atom probabilistically (0.0 to 1.0)
-   VLM evaluates: Is this criterion met in the image?
-
-3. Calculate Geometric Mean:
-   Soft-TIFA GM = (score₁ × score₂ × ... × scoreₙ)^(1/n) × 100
+Soft-TIFA GM = (score₁ × score₂ × ... × scoreₙ)^(1/n) × 100
 ```
 
-### Example:
-```
-Prompt: "A red car on a highway with mountains in background"
+### 2. DSG — The Structural Logician *(Google, ICLR 2024)*
 
-Atoms:
-- "A car is present" → 1.0 ✓
-- "The car is red" → 0.9 ✓ (slightly orange-red)
-- "Car is on a highway" → 0.8 ✓ (looks like highway)
-- "Mountains in background" → 0.0 ✗ (no mountains visible)
+**DSG (Davidsonian Scene Graph)** evaluates logical faithfulness with dependency validity.
 
-Soft-TIFA GM = (1.0 × 0.9 × 0.8 × 0.0)^(1/4) × 100 = 0/100
-```
+- **Methodology:** 3-stage LLM pipeline (tuples → questions → dependency DAG) → binary yes/no VQA → dependency filtering
+- **Key Strength:** If an object is absent, its attributes/relations are automatically zeroed out (no false credit)
+- **Range:** 0-100 | **Good score:** 70+
 
-**Result:** Low score because mountains are missing (compositional AND logic).
+### 3. PSG — The Visual Surveyor *(ByteDance, ICCV 2025)*
+
+**PSG (Panoptic Scene Graph)** evaluates structural scene-graph alignment.
+
+- **Methodology:** Build scene graphs from both prompt and image → match objects, attributes, relations → F1 score
+- **Key Strength:** Evaluates objects, attributes, and relations as separate dimensions — penalizes both extras and omissions
+- **Range:** 0-100 | **Good score:** 70+
+
+**Why three?** Each metric trusts a different signal: Soft-TIFA trusts token probabilities, DSG trusts logical structure, PSG trusts visual parsing.
 
 ---
 
@@ -77,9 +75,9 @@ Soft-TIFA GM = (1.0 × 0.9 × 0.8 × 0.0)^(1/4) × 100 = 0/100
 | Metric | What It Measures | Best For |
 |--------|------------------|----------|
 | **TIFA** | QA pair verification | Factual accuracy |
-| **DSG** | Davidsonian semantic primitives | Structured verification |
-| **PSG** | Scene graph structure | Object relationships |
 | **VPEval** | Visual programming evaluation | Compositional reasoning |
+
+*Note: DSG and PSG are promoted to North Star metrics and no longer listed as supporting alignment metrics.*
 
 **Implementation:** `src/metrics/alignment.py` - CLIP/ViLT models + GPT-4o VLM
 
@@ -102,10 +100,10 @@ Soft-TIFA GM = (1.0 × 0.9 × 0.8 × 0.0)^(1/4) × 100 = 0/100
 
 ### Single Image Evaluation
 ```
-1. Calculate Soft-TIFA GM (North Star)
-   - Extract atomic criteria from prompt
-   - Evaluate each atom probabilistically
-   - Calculate geometric mean
+1. Calculate North Star Metrics (Soft-TIFA GM, DSG, PSG)
+   - Soft-TIFA: Extract atomic criteria → probabilistic verification → geometric mean
+   - DSG: Tuple extraction → dependency DAG → VQA verification
+   - PSG: Scene graph extraction → structural matching → F1 score
    ↓
 2. Run T2ISafety evaluation
    ↓
@@ -113,11 +111,11 @@ Soft-TIFA GM = (1.0 × 0.9 × 0.8 × 0.0)^(1/4) × 100 = 0/100
    ↓
 4. Calculate Model-based Alignment metrics (CLIPScore, VQAScore, AHEaD, PickScore)
    ↓
-5. Calculate VLM-based Alignment metrics (TIFA, DSG, PSG, VPEval)
+5. Calculate VLM-based Alignment metrics (TIFA, VPEval)
    ↓
 6. Run Expert VLM evaluation (GPT-4o qualitative assessment)
    ↓
-6. Generate comprehensive report
+7. Generate comprehensive report
 ```
 
 ### Batch Evaluation
@@ -137,10 +135,10 @@ Summary:
 
 The report is organized in this order:
 
-1. **⭐ North Star Metric** - Soft-TIFA GM score prominently displayed
+1. **⭐ North Star Metrics** - Soft-TIFA GM, DSG, and PSG scores prominently displayed
 2. **🔬 Soft-TIFA Atomic Fact Verification** - Detailed breakdown of each criterion
 3. **💡 Expert VLM Evaluation** - GPT-4o subjective assessment
-4. **🎯 Alignment Metrics** - Model-based (CLIPScore, VQAScore, AHEaD, PickScore) + VLM-based (TIFA, DSG, PSG, VPEval)
+4. **🎯 Alignment Metrics** - Model-based (CLIPScore, VQAScore, AHEaD, PickScore) + VLM-based (TIFA, VPEval)
 5. **🖼️ Image Quality Metrics** - BRISQUE, NIQE, CLIP-IQA
 6. **🛡️ Safety Metrics** - Toxicity, Fairness, Privacy
 7. **📊 Overall Summary** - Category averages
@@ -178,9 +176,10 @@ src/
 
 ## 🎓 When to Use Each Metric
 
-### Soft-TIFA GM (Always Report First)
-- **Use for:** Primary quality indicator, benchmark comparisons
-- **Strengths:** Fine-grained correctness, compositional logic
+### North Star Metrics (Always Report First)
+- **Soft-TIFA GM:** Primary quality indicator — fine-grained probabilistic correctness
+- **DSG:** Structural logical verification with dependency filtering
+- **PSG:** Scene graph alignment with object/attribute/relation matching
 
 ### Image Quality Metrics
 - **Use for:** Technical assessment independent of prompt
@@ -190,7 +189,7 @@ src/
 - **CLIPScore:** Quick global semantic assessment
 - **VQAScore:** Factual verification via Q&A
 - **AHEaD:** Fine-grained CLIP-based alignment
-- **TIFA/DSG/PSG/VPEval:** VLM-based structured verification
+- **TIFA/VPEval:** VLM-based structured verification
 
 ### Safety Metrics
 - **Use for:** Responsible AI evaluation
@@ -202,11 +201,11 @@ src/
 
 | Task | Primary Metric | Supporting Metrics |
 |------|----------------|-------------------|
-| **Benchmark T2I Models** | Soft-TIFA GM | CLIPScore, Image Quality |
+| **Benchmark T2I Models** | Soft-TIFA GM, DSG, PSG | CLIPScore, Image Quality |
 | **Debug Generation Quality** | Image Quality | CLIP-IQA, VLM Quality Estimate |
-| **Verify Prompt Adherence** | Soft-TIFA GM | VQAScore, Attribute Accuracy |
-| **Evaluate Complex Prompts** | Soft-TIFA GM | VLM-as-a-Judge (Reasoning) |
-| **Compare Model Outputs** | Soft-TIFA GM | All Alignment + Quality |
+| **Verify Prompt Adherence** | Soft-TIFA GM, DSG | VQAScore, Attribute Accuracy |
+| **Evaluate Complex Prompts** | Soft-TIFA GM, PSG | VLM-as-a-Judge (Reasoning) |
+| **Compare Model Outputs** | All 3 North Stars | All Alignment + Quality |
 | **Style Transfer** | LPIPS | Image Quality |
 
 ---
@@ -257,13 +256,14 @@ prompt
 ## ✅ Summary
 
 **Key Design Decisions:**
-1. ⭐ **North Star First:** Soft-TIFA GM reported prominently
-2. 📊 **Hierarchical Structure:** North Star → VLM Evaluation → Alignment → Quality → Safety
+1. ⭐ **Three North Stars:** Soft-TIFA GM, DSG, and PSG reported prominently — each trusts a different signal
+2. 📊 **Hierarchical Structure:** North Stars → VLM Evaluation → Alignment → Quality → Safety
 3. 🔧 **Modular Implementation:** Shared `metrics/` module for all metric calculations
 4. 🎯 **Use-Case Driven:** Different metrics for different evaluation needs
 
 **Architecture:**
-- Single entry point: `app.py`
-- Shared metrics module: `metrics/`
+- Root launcher: `run.py`
+- Single entry point: `webapp/gradio-demo/src/app.py`
+- Shared metrics module: `webapp/gradio-demo/src/metrics/`
 - Performance metrics displayed under the image
 - Comprehensive report on the right side

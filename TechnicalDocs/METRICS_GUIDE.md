@@ -8,7 +8,7 @@ This guide explains the metrics and report structure used to evaluate your gener
 
 Your report is organized in this order:
 
-1. **⭐ North Star Metric** - Primary quality indicator (Soft-TIFA GM)
+1. **⭐ North Star Metrics** - Three complementary faithfulness indicators (Soft-TIFA GM, DSG, PSG)
 2. **🔬 Soft-TIFA Atomic Fact Verification** - Detailed breakdown of extracted criteria
 3. **💡 Expert VLM Evaluation** - GPT-4o subjective quality assessment
 4. **🎯 Alignment Metrics** - Text-image correspondence scores
@@ -20,17 +20,32 @@ Your report is organized in this order:
 
 ---
 
-## ⭐ NORTH STAR METRIC
+## ⭐ NORTH STAR METRICS
 
-### **Soft-TIFA GM** (Geometric Mean)
-- **What it measures**: Overall text-image alignment accuracy
+Three complementary faithfulness metrics, each representing a different evaluation paradigm:
+
+### **Soft-TIFA GM** — The Probabilistic Fact-Checker *(Meta, GenEval 2)*
+- **What it measures**: Probabilistic atom-level faithfulness
 - **How it works**: 
-  1. GPT-4o extracts atomic facts from your prompt (e.g., "steampunk workshop", "brass gears", "mechanical owl")
+  1. GPT-4o extracts atomic facts from your prompt (e.g., "wooden rabbits", "green horses", "striped chair")
   2. Each fact is verified probabilistically in the image (0.0 to 1.0)
   3. Geometric mean of all verification scores × 100 = final score
-- **Range**: 0-100 (higher = better alignment)
-- **Good score**: 80+
-- **Why it's the North Star**: Uses compositional AND logic - all facts must be present for a high score
+- **Range**: 0-100 | **Good score**: 80+
+- **Strength**: Captures uncertainty — a shaky match scores 0.6, not 1.0. GM penalizes any single failed atom.
+
+### **DSG** — The Structural Logician *(Google, ICLR 2024)*
+- **What it measures**: Logical faithfulness with dependency validity
+- **How it works**: 3-stage LLM pipeline (tuples → questions → dependency DAG) → binary yes/no VQA → dependency filtering
+- **Range**: 0-100 | **Good score**: 70+
+- **Strength**: If an object is absent, its attributes/relations are automatically zeroed out (no false credit).
+
+### **PSG** — The Visual Surveyor *(ByteDance, ICCV 2025)*
+- **What it measures**: Structural scene-graph alignment
+- **How it works**: Build scene graphs from both prompt and image → match objects, attributes, relations → F1 score
+- **Range**: 0-100 | **Good score**: 70+
+- **Strength**: Evaluates objects, attributes, and relations as separate dimensions — penalizes extras and omissions.
+
+**Why three?** Each metric trusts a different signal: Soft-TIFA trusts token probabilities, DSG trusts logical structure, PSG trusts visual parsing.
 
 ---
 
@@ -61,9 +76,9 @@ These measure how well the image matches your text prompt:
 | Metric | Method | Good Score |
 |--------|--------|------------|
 | **TIFA** | Question-answer pair verification | 70+ |
-| **DSG** | Davidsonian Scene Graph decomposition | 70+ |
-| **PSG** | Panoptic Scene Graph evaluation | 70+ |
 | **VPEval** | Visual Programming evaluation | 70+ |
+
+*Note: DSG and PSG are promoted to North Star metrics.*
 
 ---
 
@@ -95,6 +110,7 @@ All use GPT-4o to analyze potential ethical and safety concerns:
 
 ### Good Scores Generally Mean:
 - **Soft-TIFA GM 80+**: Excellent prompt alignment
+- **DSG/PSG 70+**: Strong structural faithfulness
 - **VQAScore/CLIPScore 70+**: Strong text-image correspondence
 - **BRISQUE/NIQE 80+**: High technical quality
 - **Safety Metrics 95+**: No significant concerns
@@ -110,9 +126,11 @@ All use GPT-4o to analyze potential ethical and safety concerns:
 ## 🎯 Which Metrics Should You Trust Most?
 
 **For Alignment:**
-1. **Soft-TIFA GM** (most comprehensive)
-2. **VQAScore** (direct verification)
-3. **CLIPScore** (industry standard)
+1. **Soft-TIFA GM** (probabilistic fact-checking)
+2. **DSG** (logical structure with dependency filtering)
+3. **PSG** (scene graph matching)
+4. **VQAScore** (direct verification)
+5. **CLIPScore** (industry standard)
 
 **For Technical Quality:**
 1. **Qualitative Assessment** (human-like judgment)
@@ -163,6 +181,8 @@ This section documents how each metric is calculated - whether using external op
 | Metric | Implementation | Description |
 |--------|---------------|-------------|
 | **Soft-TIFA GM** | ✅ Custom | GPT-4o extracts atomic facts, then verifies each via VQA. Geometric mean of verification scores. |
+| **DSG** | ✅ Custom | Azure OpenAI GPT-4o: tuple extraction → dependency DAG → VQA verification |
+| **PSG** | ✅ Custom | Azure OpenAI GPT-4o: scene graph extraction → structural matching → F1 score |
 
 ### Safety Metrics
 
