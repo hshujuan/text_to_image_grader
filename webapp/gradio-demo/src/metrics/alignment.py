@@ -362,10 +362,11 @@ def _calculate_pickscore_fallback(image, prompt):
 
 def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
     """
-    Calculate all VLM-based metrics (TIFA, DSG, PSG, VPEval) in parallel.
+    Calculate VLM-based North Star metrics (DSG, PSG) in parallel.
     
-    This is significantly faster than calling each metric sequentially.
-    Also uses caching to avoid recalculating for identical image+prompt pairs.
+    TIFA and VPEval were removed to reduce API calls and speed up scoring.
+    Soft-TIFA GM already covers probabilistic fact-checking (TIFA overlap),
+    and VPEval adds limited unique signal compared to DSG/PSG.
     
     Args:
         image: PIL Image to evaluate
@@ -374,35 +375,24 @@ def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
         model: Model deployment name
     
     Returns:
-        dict: {"tifa": score, "dsg": score, "psg": score, "vpeval": score}
+        dict: {"dsg": score, "dsg_details": ..., "psg": score, "psg_details": ...}
     """
     cache_key = _get_cache_key(image, prompt)
     
     # Check if all metrics are cached
-    cached_tifa = _cache_get(cache_key, "tifa")
     cached_dsg = _cache_get(cache_key, "dsg")
     cached_psg = _cache_get(cache_key, "psg")
-    cached_vpeval = _cache_get(cache_key, "vpeval")
     
-    if all(v is not None for v in [cached_tifa, cached_dsg, cached_psg, cached_vpeval]):
+    if all(v is not None for v in [cached_dsg, cached_psg]):
         print("Using cached VLM metrics")
         return {
-            "tifa": cached_tifa,
             "dsg": cached_dsg,
             "psg": cached_psg,
-            "vpeval": cached_vpeval
         }
     
     results = {}
     
     # Define metric functions to run in parallel
-    def run_tifa():
-        if cached_tifa is not None:
-            return ("tifa", cached_tifa, None)
-        score = calculate_tifa_score(image, prompt, client, model)
-        _cache_set(cache_key, "tifa", score)
-        return ("tifa", score, None)
-    
     def run_dsg():
         if cached_dsg is not None:
             return ("dsg", cached_dsg, None)
@@ -419,20 +409,11 @@ def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
         _cache_set(cache_key, "psg", score)
         return ("psg", score, detail)
     
-    def run_vpeval():
-        if cached_vpeval is not None:
-            return ("vpeval", cached_vpeval, None)
-        score = calculate_vpeval_score(image, prompt, client, model)
-        _cache_set(cache_key, "vpeval", score)
-        return ("vpeval", score, None)
-    
-    # Run all metrics in parallel using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # Run DSG and PSG in parallel
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
-            executor.submit(run_tifa),
             executor.submit(run_dsg),
             executor.submit(run_psg),
-            executor.submit(run_vpeval)
         ]
         
         for future in as_completed(futures):
@@ -447,12 +428,10 @@ def calculate_all_vlm_metrics_parallel(image, prompt, client, model):
     
     # Ensure all keys exist
     return {
-        "tifa": results.get("tifa", 0.0),
         "dsg": results.get("dsg", 0.0),
         "dsg_details": results.get("dsg_details"),
         "psg": results.get("psg", 0.0),
         "psg_details": results.get("psg_details"),
-        "vpeval": results.get("vpeval", 0.0)
     }
 
 

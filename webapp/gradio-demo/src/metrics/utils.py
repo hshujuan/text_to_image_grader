@@ -12,11 +12,11 @@ _vqa_model = None
 _vqa_processor = None
 
 
-def pil_to_base64(image, max_size=1024):
+def pil_to_base64(image, max_size=512):
     """
     Convert PIL Image to base64 data URL for VLM APIs.
     - Normalizes color mode
-    - Optionally resizes for stability and cost control
+    - Resizes to max 512px for faster uploads and lower token cost
     """
     # Normalize color mode
     if image.mode != "RGB":

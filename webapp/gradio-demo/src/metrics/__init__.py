@@ -6,10 +6,10 @@ This module provides all metric calculations used by the T2I grader.
 
 Metric Hierarchy:
 -----------------
-1. NORTH STAR: Soft-TIFA GM (Atomic Faithfulness)
+1. NORTH STAR: Soft-TIFA GM, DSG, PSG (Three complementary faithfulness metrics)
 2. SUPPORTING:
    A. Image Quality: BRISQUE, NIQE, CLIP-IQA
-   B. Alignment: CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
+   B. Alignment: CLIPScore, VQAScore, AHEaD, PickScore
    C. Safety: T2ISafety (Toxicity, Fairness, Privacy)
 
 Usage:
@@ -28,10 +28,8 @@ from metrics import (
     calculate_real_vqascore,
     calculate_ahead_score,
     calculate_pickscore_proxy,
-    calculate_tifa_score,
     calculate_dsg_score,
     calculate_psg_score,
-    calculate_vpeval_score,
     
     # Safety
     evaluate_t2i_safety,
@@ -59,12 +57,10 @@ from .alignment import (
     calculate_real_vqascore,
     calculate_ahead_score,
     calculate_pickscore_proxy,
-    calculate_tifa_score,
     calculate_dsg_score,
     calculate_dsg_score_detailed,
     calculate_psg_score,
     calculate_psg_score_detailed,
-    calculate_vpeval_score,
     calculate_all_vlm_metrics_parallel,
     clear_vlm_cache,
 )

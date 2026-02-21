@@ -72,13 +72,7 @@ These measure how well the image matches your text prompt:
 | **AHEaD** | CLIP attention-based alignment | 60+ |
 | **PickScore** | Human preference estimation | 70+ |
 
-### VLM-Based (GPT-4o)
-| Metric | Method | Good Score |
-|--------|--------|------------|
-| **TIFA** | Question-answer pair verification | 70+ |
-| **VPEval** | Visual Programming evaluation | 70+ |
-
-*Note: DSG and PSG are promoted to North Star metrics.*
+*Note: DSG and PSG are North Star metrics. TIFA and VPEval were removed — Soft-TIFA GM already covers probabilistic fact-checking, and DSG/PSG provide stronger structural signals.*
 
 ---
 
@@ -171,10 +165,8 @@ This section documents how each metric is calculated - whether using external op
 | **PickScore** | ✅ External Package | HuggingFace `transformers` (`yuvalkirstain/PickScore_v1`) | CLIP + aesthetics proxy |
 | **VQAScore** | ✅ Custom | ViLT model via `transformers` | N/A |
 | **AHEaD** | ✅ Custom | OpenAI CLIP attention patterns | N/A |
-| **TIFA** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
 | **DSG** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
 | **PSG** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
-| **VPEval** | ✅ Custom | Azure OpenAI GPT-4o | N/A |
 
 ### North Star Metric
 
@@ -205,7 +197,7 @@ transformers           # PickScore (HuggingFace), ViLT (VQA)
 clip (OpenAI)          # CLIP embeddings for AHEaD, fallback CLIPScore
 
 # VLM-Based Metrics
-azure-ai-inference     # GPT-4o for TIFA, DSG, PSG, VPEval, Safety, Soft-TIFA
+azure-ai-inference     # GPT-4o for DSG, PSG, Safety, Soft-TIFA
 ```
 
 ### Why External Packages?

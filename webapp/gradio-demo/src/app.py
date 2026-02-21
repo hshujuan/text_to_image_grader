@@ -47,12 +47,10 @@ from metrics import (
     calculate_real_vqascore,
     calculate_ahead_score,
     calculate_pickscore_proxy,
-    calculate_tifa_score,
     calculate_dsg_score,
     calculate_dsg_score_detailed,
     calculate_psg_score,
     calculate_psg_score_detailed,
-    calculate_vpeval_score,
     calculate_all_vlm_metrics_parallel,
     
     # Safety Metrics
@@ -82,7 +80,7 @@ try:
         api_version=grading_api_version,
         azure_endpoint=grading_endpoint,
         api_key=grading_api_key,
-        timeout=httpx.Timeout(120.0, connect=30.0),  # 120s request timeout, 30s connect
+        timeout=httpx.Timeout(120.0, connect=30.0, write=60.0),  # 120s read, 60s write (large image uploads), 30s connect
         max_retries=3,  # Retry on transient errors / rate limits
     )
     grading_enabled = True
@@ -376,26 +374,24 @@ def grade_image_quality_with_status(image, prompt, progress=None):
         progress(0.56, desc="🎯 Alignment metrics complete ✓")
     yield "*Calculating metrics...*", f"🎯 **Step 4/6:** Alignment metrics complete ✓", ""
     
-    # Fifth, calculate VLM-based alignment metrics (TIFA, DSG, PSG, VPEval)
-    # OPTIMIZED: Run all 4 metrics in parallel with batched verification
+    # Fifth, calculate VLM-based North Star metrics (DSG, PSG)
+    # OPTIMIZED: Run both in parallel; TIFA and VPEval removed to cut ~4 API calls
     if progress:
         progress(0.58, desc="🔬 Step 5/6: VLM metrics (parallel)...")
-    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating VLM alignment metrics in parallel...", ""
-    print("Calculating VLM-based alignment metrics (parallel + batched)...")
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** Calculating DSG + PSG in parallel...", ""
+    print("Calculating VLM-based alignment metrics (parallel)...")
     vlm_align_start = time.time()
     
-    # Single parallel call for all VLM metrics
+    # Parallel call for DSG and PSG
     vlm_results = calculate_all_vlm_metrics_parallel(image, prompt, grading_client, grading_deployment)
-    tifa_align_score = vlm_results["tifa"]
     dsg_score = vlm_results["dsg"]
     dsg_details = vlm_results.get("dsg_details")
     psg_score = vlm_results["psg"]
     psg_details = vlm_results.get("psg_details")
-    vpeval_score = vlm_results["vpeval"]
     
     if progress:
         progress(0.70, desc="🔬 Step 5/6: VLM metrics complete ✓")
-    yield "*Calculating metrics...*", "🔬 **Step 5/6:** VLM alignment metrics complete ✓", ""
+    yield "*Calculating metrics...*", "🔬 **Step 5/6:** DSG + PSG complete ✓", ""
     vlm_align_time = time.time() - vlm_align_start
     
     grading_prompt = f"""
@@ -532,10 +528,8 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
         metrics['clip_score'] = round(clip_score, 2)
         metrics['ahead_score'] = round(ahead_score, 2)
         metrics['pick_score'] = round(pick_score, 2)
-        metrics['tifa_align_score'] = round(tifa_align_score, 2)
         metrics['dsg_score'] = round(dsg_score, 2)
         metrics['psg_score'] = round(psg_score, 2)
-        metrics['vpeval_score'] = round(vpeval_score, 2)
         metrics['toxicity_score'] = round(toxicity_score, 2)
         metrics['fairness_score'] = round(fairness_score, 2)
         metrics['privacy_score'] = round(privacy_score, 2)
@@ -554,7 +548,7 @@ Note: Quantitative metrics (VQAScore, CLIPScore, TIFA, DSG, etc.) are calculated
         atom_details = "\n".join([f"- **{atom}:** {score:.2f}" for atom, score in zip(atoms, atom_scores)])
         
         # Calculate averages (include VLM-based alignment metrics)
-        avg_alignment = np.mean([vqa_score, clip_score, ahead_score, pick_score, tifa_align_score, dsg_score, psg_score, vpeval_score])
+        avg_alignment = np.mean([vqa_score, clip_score, ahead_score, pick_score, dsg_score, psg_score])
         avg_quality = np.mean([brisque_score, niqe_score, clip_iqa_score])
         avg_safety = np.mean([toxicity_score, fairness_score, privacy_score])
         
@@ -635,13 +629,11 @@ Metrics measuring text-image correspondence:
 | AHEaD | {ahead_score:.2f}/100 | CLIP attention-based alignment |
 | PickScore | {pick_score:.2f}/100 | Human preference estimation |
 
-### VLM-Based (GPT-4o)
+### VLM-Based (GPT-4o) — North Stars
 | Metric | Score | Description |
 |--------|-------|-------------|
-| TIFA | {tifa_align_score:.2f}/100 | Text-Image Faithfulness via QA |
 | DSG | {dsg_score:.2f}/100 | Davidsonian Scene Graph |
 | PSG | {psg_score:.2f}/100 | Panoptic Scene Graph |
-| VPEval | {vpeval_score:.2f}/100 | Visual Programming evaluation |
 
 | **Overall Average** | **{avg_alignment:.2f}/100** | |
 
@@ -1340,10 +1332,10 @@ These measure how well the image matches your text prompt:
 ### VLM-Based (GPT-4o)
 | Metric | Method | Good Score |
 |--------|--------|------------|
-| **TIFA** | QA pair verification | 70+ |
 | **DSG** | Davidsonian Scene Graph primitives | 70+ |
 | **PSG** | Panoptic Scene Graph structure | 70+ |
-| **VPEval** | Visual Programming evaluation | 70+ |
+
+*Note: TIFA and VPEval were removed — Soft-TIFA GM already covers probabilistic fact-checking, and DSG/PSG provide stronger structural signals.*
 
 ---
 

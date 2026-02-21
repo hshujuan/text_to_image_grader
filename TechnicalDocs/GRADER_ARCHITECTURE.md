@@ -71,15 +71,9 @@ Soft-TIFA GM = (score₁ × score₂ × ... × scoreₙ)^(1/n) × 100
 | **AHEaD** | CLIP attention-based alignment | Fine-grained matching |
 | **PickScore** | Human preference estimation | Subjective quality |
 
-#### VLM-Based (GPT-4o)
-| Metric | What It Measures | Best For |
-|--------|------------------|----------|
-| **TIFA** | QA pair verification | Factual accuracy |
-| **VPEval** | Visual programming evaluation | Compositional reasoning |
+*Note: DSG and PSG are North Star metrics. TIFA and VPEval were removed — Soft-TIFA GM already covers probabilistic fact-checking, and DSG/PSG provide stronger structural signals.*
 
-*Note: DSG and PSG are promoted to North Star metrics and no longer listed as supporting alignment metrics.*
-
-**Implementation:** `src/metrics/alignment.py` - CLIP/ViLT models + GPT-4o VLM
+**Implementation:** `src/metrics/alignment.py` - CLIP/ViLT models
 
 ---
 
@@ -111,11 +105,9 @@ Soft-TIFA GM = (score₁ × score₂ × ... × scoreₙ)^(1/n) × 100
    ↓
 4. Calculate Model-based Alignment metrics (CLIPScore, VQAScore, AHEaD, PickScore)
    ↓
-5. Calculate VLM-based Alignment metrics (TIFA, VPEval)
+5. Run Expert VLM evaluation (GPT-4o qualitative assessment)
    ↓
-6. Run Expert VLM evaluation (GPT-4o qualitative assessment)
-   ↓
-7. Generate comprehensive report
+6. Generate comprehensive report
 ```
 
 ### Batch Evaluation
@@ -138,7 +130,7 @@ The report is organized in this order:
 1. **⭐ North Star Metrics** - Soft-TIFA GM, DSG, and PSG scores prominently displayed
 2. **🔬 Soft-TIFA Atomic Fact Verification** - Detailed breakdown of each criterion
 3. **💡 Expert VLM Evaluation** - GPT-4o subjective assessment
-4. **🎯 Alignment Metrics** - Model-based (CLIPScore, VQAScore, AHEaD, PickScore) + VLM-based (TIFA, VPEval)
+4. **🎯 Alignment Metrics** - Model-based (CLIPScore, VQAScore, AHEaD, PickScore)
 5. **🖼️ Image Quality Metrics** - BRISQUE, NIQE, CLIP-IQA
 6. **🛡️ Safety Metrics** - Toxicity, Fairness, Privacy
 7. **📊 Overall Summary** - Category averages
@@ -159,7 +151,7 @@ src/
     ├── utils.py        # Utilities (pil_to_base64, model loaders)
     ├── soft_tifa.py    # North Star metric
     ├── image_quality.py # BRISQUE, NIQE, CLIP-IQA
-    ├── alignment.py    # CLIPScore, VQAScore, AHEaD, PickScore, TIFA, DSG, PSG, VPEval
+    ├── alignment.py    # CLIPScore, VQAScore, AHEaD, PickScore, DSG, PSG
     └── safety.py       # T2ISafety evaluation
 ```
 
@@ -168,7 +160,7 @@ src/
 - **CLIPScore**: Real CLIP embeddings cosine similarity
 - **VQAScore**: Real ViLT model question answering
 - **AHEaD**: CLIP attention-based alignment metric
-- **TIFA/DSG/PSG/VPEval**: VLM-based alignment metrics (GPT-4o)
+- **DSG/PSG**: VLM-based alignment metrics (GPT-4o)
 - **Image Quality**: Laplacian-based estimation (OpenCV)
 - **Safety**: GPT-4o VLM evaluation
 
@@ -189,7 +181,7 @@ src/
 - **CLIPScore:** Quick global semantic assessment
 - **VQAScore:** Factual verification via Q&A
 - **AHEaD:** Fine-grained CLIP-based alignment
-- **TIFA/VPEval:** VLM-based structured verification
+- **VQAScore:** Direct factual verification
 
 ### Safety Metrics
 - **Use for:** Responsible AI evaluation
