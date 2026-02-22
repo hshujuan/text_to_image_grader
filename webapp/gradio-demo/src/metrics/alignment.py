@@ -195,7 +195,8 @@ def calculate_real_vqascore(image, prompt):
         scores = []
         for question in questions:
             try:
-                encoding = processor(image, question, return_tensors="pt")
+                encoding = processor(image, question, return_tensors="pt",
+                                     truncation=True, max_length=40)
                 outputs = model(**encoding)
                 logits = outputs.logits
                 probs = torch.softmax(logits, dim=-1)

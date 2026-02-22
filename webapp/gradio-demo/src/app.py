@@ -1144,7 +1144,7 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
                 sample2 = gr.Button("🟡 GenEval2 Spatial: a candle, and a blue truck in front of a cookie", size="sm")
             with gr.Row():
                 sample3 = gr.Button("🔴 GenEval2 Hard: seven wooden rabbits, and three green horses in front of a striped chair", size="sm")
-                sample4 = gr.Button("🟣 Complex (free-text): A young kid wearing a winter coat holding a warm lantern, standing beside a friendly golden retriever in a snowy forest during early evening, cinematic lighting, ultra detailed.", size="sm")
+                sample4 = gr.Button("🟣 Complex (free-text): An old man in a winter coat holding a lantern beside a golden retriever in a snowy forest at dusk", size="sm")
             
             with gr.Row():
                 generate_btn = gr.Button("🚀 Generate Image", variant="primary", size="lg")
@@ -1182,7 +1182,7 @@ with gr.Blocks(title="Text-to-Image Generator with AI Grading") as demo:
             sample1.click(lambda: "a elephant and a purple kangaroo", outputs=prompt, queue=False, show_progress="hidden")
             sample2.click(lambda: "a candle, and a blue truck in front of a cookie", outputs=prompt, queue=False, show_progress="hidden")
             sample3.click(lambda: "seven wooden rabbits, and three green horses in front of a striped chair", outputs=prompt, queue=False, show_progress="hidden")
-            sample4.click(lambda: "A young kid wearing a winter coat holding a warm lantern, standing beside a friendly golden retriever in a snowy forest during early evening, cinematic lighting, ultra detailed.", outputs=prompt, queue=False, show_progress="hidden")
+            sample4.click(lambda: "An old man in a winter coat holding a lantern beside a golden retriever in a snowy forest at dusk", outputs=prompt, queue=False, show_progress="hidden")
             
             # Generate image button - clears status on new generation
             generate_btn.click(
