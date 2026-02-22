@@ -134,7 +134,7 @@ The application has three tabs:
    - 🟢 **GenEval2 Easy**: "a elephant and a purple kangaroo"
    - 🟡 **GenEval2 Spatial**: "a candle, and a blue truck in front of a cookie"
    - 🔴 **GenEval2 Hard**: "seven wooden rabbits, and three green horses in front of a striped chair"
-   - 🟣 **Complex (free-text)**: "A small child holding a glowing lantern while standing next to a golden retriever in a snowy forest at dusk"
+   - 🟣 **Complex (free-text)**: "A young kid wearing a winter coat holding a warm lantern, standing beside a friendly golden retriever in a snowy forest during early evening, cinematic lighting, ultra detailed."
 
    *The first three prompts come from the [GenEval2](https://github.com/facebookresearch/GenEval2) benchmark and include pre-defined VQA atoms for precise evaluation.*
 
